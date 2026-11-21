@@ -44,7 +44,7 @@ assert not missing, f"wheel is missing package data: {missing}"
 PY
   (
     unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-    export HOME="$tmp/stranger" PATH="$tmp/bin:$PATH"
+    export HOME="$tmp/stranger" XDG_CONFIG_HOME="$tmp/stranger/.config" PATH="$tmp/bin:$PATH"
     mkdir -p "$HOME"
     opsquire init "$HOME/ops-home" --budget 15 | tee "$tmp/init.log"
     task=$(sed -n 's/^first task: created and ready (\([^)]*\)).*/\1/p' "$tmp/init.log")

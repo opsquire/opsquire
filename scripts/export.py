@@ -6,7 +6,7 @@ With --bump it first sets the new version here, as a GitHub-signed commit on mai
 of main, refuses unless the private word list (scripts/clean_text.py) is present and none of its words is in any file
 or in the release notes, refuses when the public main holds changes that no export made, and sends the files that
 differ as GitHub-signed commits on the public main: one commit, or several parts when the change is too big for one
-request. The last commit carries the release notes, built from this repository's commits since the previous export,
+request. The last commit carries the release notes, built from this repository's commits since the previous release,
 and names the commit it was exported from. The public repository's release workflow then tags and publishes that
 version. --dry shows all of it and changes nothing."""
 
@@ -107,11 +107,20 @@ def public_files(to: str, oid: str) -> dict[str, str]:
     return {str(e["path"]): str(e["sha"]) for e in tree["tree"] if e["type"] == "blob"}
 
 
-def previous_tag(to: str) -> str | None:
+def released(to: str) -> tuple[str, str] | None:
+    """The newest public release tag and the commit of this repository its export came from; None before the first."""
     tags = gh_json(f"repos/{to}/tags?per_page=100")
     assert isinstance(tags, list)
     names = [str(t["name"]) for t in tags if re.fullmatch(r"v\d+\.\d+\.\d+", str(t["name"]))]
-    return max(names, key=lambda n: tuple(int(x) for x in n[1:].split(".")), default=None)
+    if not names:
+        return None
+    tag = max(names, key=lambda n: tuple(int(x) for x in n[1:].split(".")))
+    commit = gh_json(f"repos/{to}/commits/{tag}")
+    assert isinstance(commit, dict)
+    source = exported_from(str(commit["commit"]["message"]))
+    if source is None:
+        raise ExportError(f"the public {tag} names no commit it was exported from")
+    return tag, source
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,8 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         if git("rev-parse", "HEAD").strip() != git("rev-parse", "origin/main").strip():
             raise ExportError("HEAD is not origin/main: only what is pushed to this repository's main goes out")
         head, message, has_parent = public_head(a.to)
-        since = exported_from(message)
-        if since is None and has_parent:
+        if exported_from(message) is None and has_parent:
             raise ExportError(
                 f"the public main ({head[:10]}) holds changes no export made: bring them into this repository first"
             )
@@ -145,10 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         ours = tracked(ref)
         write, delete = changes(ours, public_files(a.to, head))
         tag = f"v{version}"
-        if since is None:
+        prior = released(a.to)
+        if prior is None:
             notes = f"The first public release of opsquire.\n\n**Full changelog**: https://github.com/{a.to}/commits/{tag}\n"
         else:
-            notes = release.notes(tag, previous_tag(a.to), release.commits_between(since, ref), a.to)
+            notes = release.notes(tag, prior[0], release.commits_between(prior[1], ref), a.to)
         bad = unclean(write, ours, [notes])
         if bad:
             raise ExportError("words that never belong in the public repository: " + "; ".join(bad))
