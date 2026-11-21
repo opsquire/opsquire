@@ -1,0 +1,9 @@
+@layer views {
+  .library .block.pad { padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .library .rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .library .line code { overflow-wrap: anywhere; }
+  .library .block.pad.scroll { display: block; }
+  .tbl.lib { width: auto; }
+  .tbl.lib th, .tbl.lib td { padding-right: 32px; }
+  .tbl.lib td.num, .tbl.lib th:nth-child(n+2):nth-child(-n+4) { text-align: right; font-variant-numeric: tabular-nums; }
+}

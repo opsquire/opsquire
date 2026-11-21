@@ -1,0 +1,37 @@
+@layer views {
+  .sched { align-items: flex-start; }
+  .sched .card-main { gap: 6px; }
+  .lockico { flex: none; width: 1em; height: 1em; vertical-align: -0.12em; }
+  .schedtag { display: inline-flex; gap: 4px; align-items: center; padding: 0 8px; border-radius: 999px; font-size: .9em; font-weight: 600; color: var(--fg); background: var(--panel2); border: 1px solid var(--line); white-space: nowrap; }
+  .pbar { display: flex; gap: 3px; align-items: stretch; width: 100%; max-width: 760px; }
+  .pbar .seg { position: relative; overflow: hidden; flex: 1 1 0; min-width: 10px; height: 8px; border-radius: 3px; background: var(--line); }
+  .pbar .fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--k, var(--accent)); transition: width .9s linear, background-color .3s; }
+  .pbar .fill.done { width: 100%; background: var(--k-verify); }
+  .pbar .fill.prerun { width: 100%; background: var(--k-dry-edge); }
+  .pbar .fill.stopped { width: 100%; background: var(--k-fail); }
+  .pbar .fill.now::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--panel) 45%, transparent), transparent); animation: sheen 1.6s linear infinite; }
+  @keyframes sheen { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  @media (prefers-reduced-motion: reduce) { .pbar .fill { transition: none; } .pbar .fill.now::after { animation: none; } }
+  .pline { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; font-size: .86em; color: var(--muted); }
+  .pline b { color: var(--fg); font-weight: 600; }
+  .tr .pwrap, .job .pwrap { flex-basis: 100%; display: flex; flex-direction: column; gap: 3px; padding: 2px 0 2px 2px; }
+  .ssteps { display: flex; flex-direction: column; margin: 2px 0 0; max-width: 760px; border-left: 2px solid var(--line2); }
+  .sstep { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; padding: 3px 8px; font-size: .9em; cursor: pointer; border-radius: 4px; }
+  .sstep:hover { background: var(--panel2); }
+  .sstep .purpose { flex: 1 1 180px; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sstep .role { font-size: .82em; color: var(--muted); white-space: nowrap; min-width: 9.5em; text-align: right; }
+  .sstep .st { font-size: .82em; font-weight: 600; white-space: nowrap; min-width: 6.5em; }
+  .linkgap { flex: none; width: 16px; }
+  .sstep .st.done { color: var(--k-verify); }
+  .sstep .st.stopped { color: var(--k-fail); }
+  .sstep .st.prerun { color: var(--k-dry); }
+  .sstep .st.ready { color: var(--faint); font-weight: 400; }
+  .linkpick { flex: none; width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--accent); cursor: pointer; }
+  .linkbar { position: fixed; left: 16px; right: 16px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); max-width: 900px; margin: 0 auto; z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; box-shadow: var(--shadow); }
+  .linkbar ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+  .linkbar li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+  .linkspace { height: 180px; }
+  .linkbar .lrowtxt { min-width: 0; overflow-wrap: anywhere; }
+  .linkbar .lacts { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+  .linkbar input { flex: 1 1 220px; min-width: 0; }
+}

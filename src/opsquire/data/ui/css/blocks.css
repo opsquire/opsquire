@@ -1,0 +1,50 @@
+@layer components {
+  .block { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
+  .quiet { color: var(--muted); padding: 10px 12px; }
+  .row { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; scroll-margin-top: 70px; }
+  .row.inferred { border-left: 2px dotted var(--faint); }
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 7px 10px; cursor: pointer; border-radius: 8px; }
+  .head:hover { background: var(--panel2); }
+  .chev { display: inline-block; width: 0; height: 0; border: 5px solid transparent; border-left: 6px solid var(--faint); margin-right: 2px; transition: transform .12s; flex: none; }
+  .row.open > .head .chev { transform: rotate(90deg); }
+  .body { padding: 4px 10px 10px 22px; border-top: 1px solid var(--line2); }
+  .note { background: var(--panel2); border-left: 3px solid var(--line); padding: 4px 8px; margin: 4px 0; border-radius: 0 4px 4px 0; white-space: pre-wrap; }
+  .note.good { border-color: var(--good); }
+  .note.warn { border-color: var(--warn); }
+  .note.bad { border-color: var(--bad); }
+  .stale { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 5px; padding: 5px 12px; margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+  .stale .why { flex: 1 1 12em; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stale b { color: var(--warn); }
+  .cmds { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; align-items: flex-start; }
+  .cmd { display: inline-flex; align-items: center; gap: 8px; background: var(--code-bg); border: 1px solid var(--line2); border-radius: 5px; padding: 3px 4px 3px 8px; max-width: 100%; }
+  .cmd span { overflow-wrap: anywhere; }
+  .cmd button { padding: 1px 7px; font-size: .9em; }
+  .form { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 6px 0; display: grid; gap: 6px; }
+  .form textarea { width: 100%; min-height: 70px; resize: vertical; }
+  .form label { margin-right: 10px; }
+  table.tbl { border-collapse: collapse; width: 100%; font-size: .95em; }
+  .tbl th, .tbl td { text-align: left; padding: 4px 8px 4px 0; vertical-align: top; border-top: 1px solid var(--line2); }
+  .tbl th { color: var(--muted); font-weight: 600; border-top: 0; font-size: .9em; }
+  .tbl tr.click { cursor: pointer; }
+  .tbl tr.click:hover td { background: var(--panel2); }
+  .scroll { overflow-x: auto; }
+  .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 4px; text-transform: none; letter-spacing: 0; color: var(--fg); font-size: 1em; display: block; }
+  .md h3 { font-size: 1.15em; }
+  .md h4 { font-size: 1.05em; }
+  .md p { margin: 4px 0; }
+  .md ul, .md ol { margin: 4px 0; padding-left: 22px; }
+  .md pre { background: var(--code-bg); padding: 6px 8px; border-radius: 5px; overflow-x: auto; }
+  .md code { background: var(--code-bg); padding: 0 3px; border-radius: 3px; }
+  .md pre code { padding: 0; }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  .md .md-table { overflow-x: auto; margin: 6px 0; }
+  .md table { border-collapse: collapse; font-size: .95em; font-variant-numeric: tabular-nums; }
+  .md th, .md td { text-align: left; padding: 3px 12px 3px 0; vertical-align: top; border-top: 1px solid var(--line2); overflow-wrap: normal; }
+  .md th:last-child, .md td:last-child { padding-right: 0; }
+  .md th { color: var(--muted); font-weight: 600; font-size: .9em; border-top: 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .md th.r, .md td.r { text-align: right; white-space: nowrap; }
+  .md th.c, .md td.c { text-align: center; }
+  .result { background: var(--panel2); border: 1px solid var(--line2); border-radius: 6px; padding: 6px 10px; margin: 6px 0; }
+  #toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 6px 14px; border-radius: 6px; z-index: 20; font-size: .95em; opacity: 0; transition: opacity .15s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+}

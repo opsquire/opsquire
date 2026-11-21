@@ -1,0 +1,47 @@
+@layer views {
+  svg.flow, svg.map { display: block; overflow: visible; }
+  .flow .box { fill: var(--panel2); stroke: var(--line); stroke-width: 1; cursor: pointer; }
+  .flow .box.st-good, .map .box.st-good { fill: var(--good-bg); stroke: var(--good); }
+  .flow .box.st-bad, .map .box.st-bad { fill: var(--bad-bg); stroke: var(--bad); }
+  .flow .box.st-warn, .map .box.st-warn { fill: var(--warn-bg); stroke: var(--warn); }
+  .flow .box.st-live, .map .box.st-live { fill: var(--accent-bg); stroke: var(--accent); }
+  .flow .box.st-grey, .map .box.st-grey { fill: var(--grey-bg); stroke: var(--faint); stroke-dasharray: 2 2; }
+  .flow .box.st-neutral, .map .box.st-neutral { fill: var(--panel); stroke: var(--muted); }
+  .flow .box:hover, .flow .box.sel, .map .box:hover, .map .box.sel { stroke: var(--accent); stroke-width: 2; }
+  .flow text { font-size: 10.5px; fill: var(--fg); pointer-events: none; }
+  .flow text.st-grey { fill: var(--muted); }
+  .flow .edge { fill: none; stroke: var(--faint); stroke-width: 1; }
+  .flow .edge.superseded { stroke-dasharray: 3 2; }
+  .flow .edge.step { stroke: var(--accent); }
+  .flow marker path { fill: var(--faint); }
+  .flow .dot.good, .map .dot.good { fill: var(--good); }
+  .flow .dot.bad, .map .dot.bad { fill: var(--bad); }
+  .flow .dot.warn, .map .dot.warn { fill: var(--warn); }
+  .flow .dot.live, .map .dot.live { fill: var(--accent); }
+  .flow .dot.grey, .flow .dot.neutral, .map .dot.grey, .map .dot.neutral { fill: var(--faint); }
+  .flowwrap { overflow-x: auto; padding: 8px 0 4px; }
+  .mapctl { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px; }
+  .map.tree .trow-bg { fill: var(--panel2); }
+  .map.tree text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .map.tree .tname { font-size: 12.5px; font-weight: 650; fill: var(--fg); }
+  .map.tree .span { fill: var(--line); }
+  .map.tree .branch { fill: none; stroke: var(--faint); stroke-width: 1.2; opacity: .7; }
+  .map.tree text.leaf { font-size: 12px; fill: var(--fg); cursor: pointer; }
+  .map.tree text.leaf:hover { fill: var(--accent); }
+  .map.tree text.leaf.st-grey { fill: var(--muted); }
+  .map.tree .dot[class*="k-"] { fill: var(--k); stroke: var(--panel); stroke-width: 1.5; }
+  .map.tree .dot.fail { stroke: var(--k-fail); stroke-width: 2.2; }
+  .legend i.dot[class*="k-"] { background: var(--k); border-color: var(--k); }
+  .legend i.dot.fail { background: transparent; border: 2px solid var(--k-fail); }
+  .map .grid { stroke: var(--line2); stroke-width: 1; }
+  .map text { font-size: 11px; fill: var(--fg); }
+  .map .grid.strong { stroke: var(--line); }
+  .map .ax { fill: var(--muted); font-size: 10.5px; }
+  .map .ax.strong { fill: var(--fg); }
+  .map .ax.now { fill: var(--accent); }
+  .map .nowline { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .map .box { cursor: pointer; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--muted); font-size: .9em; margin: 6px 0; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; border: 1px solid; }
+  .legend i.dot { border-radius: 50%; width: 8px; height: 8px; }
+}

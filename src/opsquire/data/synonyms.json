@@ -1,0 +1,27 @@
+{
+  "groups": [
+    ["restart", "bounce", "respawn", "reboot", "recycle"],
+    ["kill", "terminate", "stop"],
+    ["supervisor", "supervisorctl", "process manager"],
+    ["process", "program", "pid", "daemon", "service", "supervisor"],
+    ["disk", "storage", "space", "full", "filesystem", "df", "du"],
+    ["free", "delete", "clean", "cleanup", "prune", "purge"],
+    ["reject", "rejection", "refuse", "deny"],
+    ["kill switch", "circuit breaker", "watchdog"],
+    ["upgrade", "checkout", "fast-forward"],
+    ["deploy", "release", "rollout", "ship"],
+    ["logs", "log", "journal"],
+    ["check", "verify", "validate", "audit", "survey"],
+    ["config", "configuration", "cfg", "settings"],
+    ["freeze", "hang", "hung", "stuck", "frozen", "stall"],
+    ["crash", "died", "dead", "segfault", "abort"],
+    ["error", "failure", "fail", "exception"],
+    ["latency", "delay", "lag", "slow"],
+    ["creds", "credentials", "secret", "token", "key"],
+    ["memory", "ram", "oom"],
+    ["cpu", "core", "pinning", "affinity"],
+    ["cron", "schedule", "timer"],
+    ["install", "setup"],
+    ["alert", "alarm", "notify", "notification"]
+  ]
+}

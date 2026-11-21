@@ -1,0 +1,56 @@
+@layer views {
+  .msg .bubble:has(.md-table) { max-width: min(92%, 960px); }
+  .squire { image-rendering: pixelated; flex: none; }
+  .squire .open { display: none; }
+  .squire.talking .open { display: inline; animation: talk .36s steps(1) infinite; }
+  .squire.talking .shut { animation: talk .36s steps(1) infinite reverse; }
+  @keyframes talk { 0% { opacity: 1; } 50% { opacity: 0; } }
+  .squire.scene g { opacity: 0; }
+  @keyframes frame4 { 0%, 24.99% { opacity: 1; } 25%, 100% { opacity: 0; } }
+  .msg.agent.typing .avatar { width: auto; min-width: 40px; }
+  @media (prefers-reduced-motion: reduce) {
+    .squire.scene g { animation: none !important; }
+    .squire.scene g:last-child { opacity: 1; }
+    .squire.talking .open { display: none; }
+    .squire.talking .shut { animation: none; }
+  }
+  #pane .pb.ask { background: var(--bg); padding: 0; }
+  .askbody { display: flex; flex-direction: column; height: 100%; }
+  .askbody .chat { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .askbody .asklog { flex: 1 1 auto; overflow: auto; padding: 10px 14px; background: var(--code-bg); border-top: 1px solid var(--line); }
+  .askbody.show-chat .asklog { display: none; }
+  .askbody.show-log .chat { display: none; }
+  .askbody.show-both .chat, .askbody.show-both .asklog { flex: 1 1 50%; }
+  .msg { display: flex; gap: 8px; align-items: flex-start; max-width: 100%; }
+  .msg .bubble { padding: 8px 12px; border-radius: 14px; max-width: min(78%, 640px); min-width: 0; overflow-wrap: anywhere; }
+  .msg.you { justify-content: flex-end; }
+  .msg.you .bubble { align-self: flex-end; background: var(--accent); color: var(--panel); border-bottom-right-radius: 4px; white-space: pre-wrap; }
+  .msg.agent .bubble { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.agent .avatar { flex: none; width: 40px; height: 40px; }
+  .msg.steps { padding-left: 48px; flex-direction: column; gap: 2px; font-size: .82em; }
+  .steplist { color: var(--faint); display: flex; flex-direction: column; gap: 1px; padding-left: 14px; overflow-wrap: anywhere; }
+  .msg.end { align-self: center; font-size: .82em; color: var(--muted); padding: 0 10px; border-radius: 999px; border: 1px solid var(--line2); }
+  .msg.end.good { color: var(--good); }
+  .msg.end.warn { color: var(--warn); }
+  .msg .quick { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .msg.approve .bubble { border-color: var(--warn); }
+  .msg.approve .what { margin: 6px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.approve .ask-what { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; }
+  .msg.approve .ask-what code { overflow-wrap: anywhere; font-size: .88em; }
+  .msg .quick button { white-space: normal; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+  .runs-cards { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .runcard { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; border-left: 4px solid var(--k); background: var(--kb); }
+  .msg.report { padding-left: 48px; }
+  .msg.report .bubble { background: var(--panel2); border: 1px solid var(--line2); color: var(--fg); max-width: min(92%, 720px); font-size: .9em; }
+  .msg.report .reportrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+  .msg.report .runerr { color: var(--bad); overflow-wrap: anywhere; min-width: 0; flex: 1 1 200px; }
+  .runcard .cmdline { color: var(--k); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; overflow-wrap: anywhere; }
+  .runcard .runstate { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--fg); }
+  .runcard .runerr { color: var(--bad); overflow-wrap: anywhere; min-width: 0; flex: 1 1 200px; }
+  .msg.answerbox form, .follow { display: flex; gap: 6px; width: 100%; }
+  .msg.answerbox { padding-left: 48px; }
+  .msg.queue .bubble { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  .msg.queue .qhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .msg.queue .qrow { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--line2); }
+  .msg.queue .qlabel { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85em; }
+}

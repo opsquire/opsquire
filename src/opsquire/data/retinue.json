@@ -1,0 +1,54 @@
+{
+  "default": "claude",
+  "agents": {
+    "claude": {
+      "enabled": true,
+      "about": "Claude Code headless. Runs under the same sandbox and managed policy as interactive Claude Code, with the credentials file denied to it whatever its config dir says; no API key.",
+      "argv": [
+        "claude", "-p", "{prompt}",
+        "--output-format", "stream-json", "--verbose",
+        "--append-system-prompt", "{system}",
+        "--permission-mode", "default",
+        "--settings", "{\"permissions\": {\"deny\": [\"Read(/{creds})\", \"Edit(/{var}/**)\"]}, \"sandbox\": {\"filesystem\": {\"denyRead\": [\"{creds}\"], \"denyWrite\": [\"{var}\"]}}}",
+        "--allowedTools", "{allowed_tools*}"
+      ],
+      "resume_argv": ["--resume", "{session}"],
+      "budget_argv": ["--max-budget-usd", "{budget}"],
+      "model_argv": ["--model", "{model}"],
+      "models": {
+        "quick": {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+        "default": {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        "deep": {"id": "claude-fable-5-2", "label": "Fable 5.2"}
+      },
+      "piece_tier": "quick",
+      "billing": {"key_env": "ANTHROPIC_API_KEY", "plan": "your Claude plan", "key": "your Anthropic API key"},
+      "output": "claude-stream-json",
+      "limit_re": "hit your .*?limit(?:.*?resets (?P<at>\\d{1,2}(?::\\d{2})?\\s*[ap]m)(?:\\s*\\((?P<tz>[^)]+)\\))?)?",
+      "tools": {
+        "about": "How opsquire's tool settings reach this agent: unlisted tools go to opsquire's approval server; servers switched off are hidden.",
+        "approval_argv": ["--permission-prompt-tool", "mcp__opsquire__approve", "--mcp-config", "{mcp_config}"],
+        "deny_argv": ["--disallowedTools", "{server_tools}"],
+        "server_tools": "mcp__{server}",
+        "name_re": "^mcp__(?P<server>.+?)__(?P<tool>.+)$",
+        "server_id": {"sub": "[^A-Za-z0-9_-]", "with": "_"},
+        "shell": {"tool": "Bash", "input": "command"},
+        "list": {"argv": ["claude", "mcp", "list"], "line_re": "^(?P<name>.+?): (?P<target>\\S.*?) - (?P<status>.+)$"}
+      },
+      "allowed_tools": [
+        "Read", "Glob", "Grep",
+        "Edit(/{home}/tasks/**)", "Edit(/{home}/general/**)", "Edit(/{main_home}/.repos/**)",
+        "Bash(opsquire doctor --boundary)",
+        "Bash(opsquire find *)", "Bash(opsquire ls)", "Bash(opsquire ls *)", "Bash(opsquire show *)", "Bash(opsquire new *)",
+        "Bash(opsquire lint *)", "Bash(opsquire runs)", "Bash(opsquire runs *)", "Bash(opsquire last)", "Bash(opsquire last *)",
+        "Bash(opsquire log *)", "Bash(opsquire locks)", "Bash(opsquire locks *)",
+        "Bash(opsquire repo *)", "Bash(opsquire handover *)", "Bash(opsquire home)", "Bash(opsquire contract)", "Bash(opsquire docs)", "Bash(opsquire wait *)"
+      ]
+    },
+    "codex": {
+      "enabled": false,
+      "reason": "Codex runs under its own approval rules, which opsquire cannot inspect. Enable only after reviewing that they keep it off production and away from credentials.",
+      "argv": ["codex", "exec", "-s", "workspace-write", "-C", "{home}", "--skip-git-repo-check", "{system}\n\n{prompt}"],
+      "output": "text"
+    }
+  }
+}

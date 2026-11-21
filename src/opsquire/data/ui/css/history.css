@@ -1,0 +1,14 @@
+@layer views {
+  .trow { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 8px; border-top: 1px solid var(--line2); cursor: pointer; border-radius: 4px; }
+  .trow:hover { background: var(--panel2); }
+  .trow.sel { background: var(--accent-bg); }
+  .trow.open .chev { transform: rotate(90deg); }
+  .trows { margin-top: 6px; }
+  .tdetail { padding: 2px 8px 6px 30px; border-top: 1px solid var(--line2); }
+  .mini { flex: none; }
+  .agentpick { border-radius: 999px; padding: 3px 10px; font-size: .88em; }
+  .histbar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 2px 0 14px; }
+  .histpick { display: inline-flex; gap: 6px; align-items: center; }
+  .histpick select { max-width: 260px; border-radius: 999px; padding: 3px 10px; }
+  .histabout { padding: 10px 14px; margin-bottom: 14px; }
+}

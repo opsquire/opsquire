@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Opsquire</title>
+<link rel="stylesheet" href="/ui/css/layers.css">
+<link rel="stylesheet" href="/ui/css/tokens.css">
+<link rel="stylesheet" href="/ui/css/base.css">
+<link rel="stylesheet" href="/ui/css/controls.css">
+<link rel="stylesheet" href="/ui/css/tags.css">
+<link rel="stylesheet" href="/ui/css/blocks.css">
+<link rel="stylesheet" href="/ui/css/layout.css">
+<link rel="stylesheet" href="/ui/css/inbox.css">
+<link rel="stylesheet" href="/ui/css/schedules.css">
+<link rel="stylesheet" href="/ui/css/history.css">
+<link rel="stylesheet" href="/ui/css/map.css">
+<link rel="stylesheet" href="/ui/css/chat.css">
+<link rel="stylesheet" href="/ui/css/settings.css">
+<link rel="stylesheet" href="/ui/css/library.css">
+<link rel="stylesheet" href="/ui/css/pane.css">
+<link rel="stylesheet" href="/ui/css/overrides.css">
+<script type="module" src="/ui/js/boot.js"></script>
+</head>
+<body>
+<header class="top">
+  <span class="brand" id="brand">Opsquire</span>
+  <div class="seg" role="tablist" id="seg"></div>
+  <input id="search" type="search" placeholder="Search id, purpose, area, target  ( / )" aria-label="Search">
+  <button id="themetoggle" type="button" title="Colour theme: follow the system, light or dark">Auto</button>
+  <button id="devtoggle" type="button" aria-pressed="false" title="Show ids, commands, runs and jobs in full">Developer</button>
+  <span id="conn" title="Connection to the local server">connecting</span>
+</header>
+<div class="app" id="app">
+  <main id="main"><div class="empty">Loading the home.</div></main>
+  <aside id="pane" aria-label="Details">
+    <div class="ph" id="ph"></div>
+    <div class="pb" id="pb"><div class="placeholder">Select a task, a job or a run.</div></div>
+    <div class="pf" id="pf" hidden></div>
+  </aside>
+</div>
+<div id="toast" role="status"></div>
+</body>
+</html>

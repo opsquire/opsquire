@@ -1,0 +1,11 @@
+@layer views {
+  .settings .block.pad { padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .settings .rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+  .settings .rule code { overflow-wrap: anywhere; }
+  .settings .rule.seen code { color: var(--muted); }
+  .settings .rule.add input, .addserver input { flex: 1 1 200px; min-width: 0; padding: 4px 8px; font: inherit; }
+  .settings .addserver { flex-direction: row !important; flex-wrap: wrap; align-items: center; }
+  .settings .addserver .faint { flex-basis: 100%; }
+  .settings .server.disabled { opacity: .7; }
+  .settings .switch { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+}

@@ -1,0 +1,22 @@
+@layer base {
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { font-size: 15px; }
+  html.dev { font-size: 13.5px; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding-block: env(safe-area-inset-top, 0px) env(safe-area-inset-bottom, 0px); }
+  .mono, code, pre, .id, .cmd, .prompt { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: .93em; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  input, select, textarea { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; }
+  input:focus, select:focus, textarea:focus, button:focus-visible, .head:focus-visible, .run:focus-visible, .trow:focus-visible, .ib:focus-visible, .job:focus-visible, .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .title { font-weight: 600; }
+  .grow { flex: 1 1 auto; }
+  .muted { color: var(--muted); }
+  .faint { color: var(--faint); }
+  .small { font-size: .9em; }
+  .line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 3px 0; }
+  .full { flex-basis: 100%; }
+  .err { color: var(--bad); }
+  h4 { margin: 12px 0 4px; font-size: .85em; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .empty { color: var(--muted); padding: 14px 4px; }
+}
