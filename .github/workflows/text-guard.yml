@@ -1,0 +1,29 @@
+name: Text guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  text:
+    name: words that never belong here
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Issue, comment, pull request and commit text holds none of the words on the private list
+        env:
+          OPSQUIRE_BANNED_WORDS: ${{ secrets.BANNED_WORDS }}
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '' }}
+        run: python3 scripts/clean_text.py "$GITHUB_EVENT_PATH" "$RANGE"

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  lint:
+    name: ruff, mypy, shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --quiet --upgrade pip && pip install --quiet -e ".[lint]"
+      - run: bash scripts/ci.sh lint
+
+  test:
+    name: tests (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    env:
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.invalid
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.invalid
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --quiet --upgrade pip && pip install --quiet -e ".[lint,coverage,test]"
+      - if: matrix.python != '3.13'
+        run: bash scripts/ci.sh tests
+      - if: matrix.python == '3.13'
+        name: Tests, measuring coverage of every opsquire process they start
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/coverage/.coverage
+        run: |
+          mkdir -p "$RUNNER_TEMP/coverage"
+          python -m coverage run -m pytest -q -n auto -p no:cacheprovider -W error::DeprecationWarning tests
+          python -m coverage combine -q "$RUNNER_TEMP/coverage"
+          python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report | tail -1
+
+  full-power:
+    name: every feature end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --quiet --upgrade pip && pip install --quiet -e ".[lint]"
+      - run: bash scripts/ci.sh e2e
+
+  package:
+    name: wheel installs clean
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --quiet --upgrade pip build twine uv
+      - run: bash scripts/ci.sh package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error

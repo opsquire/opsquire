@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.claude/
+.mcp.json
+.coverage
+.coverage.*
+/.private/

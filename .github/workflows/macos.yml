@@ -1,0 +1,55 @@
+name: macOS
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests on macOS
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.invalid
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.invalid
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: brew install bash shellcheck
+      - run: python -m pip install --quiet --upgrade pip && pip install --quiet -e ".[lint,test]"
+      - name: Tests run under sandbox-exec, which keeps the home, the credentials file and the network out
+        run: |
+          echo secret > "$HOME/.creds"
+          python - <<'EOF'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from opsquire import isolate
+
+          assert isolate.level(sys.executable) == isolate.SANDBOX_EXEC, isolate.REFUSED
+          with tempfile.TemporaryDirectory() as scratch:
+              profile = isolate.sandbox_profile(Path(scratch), sys.executable)
+
+              def runs(code: str) -> bool:
+                  cmd = ["sandbox-exec", "-p", profile, sys.executable, "-I", "-c", code]
+                  return subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
+
+              assert runs(f"open({str(Path(scratch) / 'ok')!r}, 'w').write('x')"), "writes its scratch folder"
+              assert not runs(f"open({str(Path.home() / '.creds')!r}).read()"), "reads the credentials file"
+              assert not runs(f"open({str(Path.home() / 'x')!r}, 'w')"), "writes the home"
+              assert not runs("import socket; socket.create_connection(('1.1.1.1', 443), 5)"), "reaches the network"
+          EOF
+      - run: python -m pytest -q -n auto -p no:cacheprovider -W error::DeprecationWarning tests

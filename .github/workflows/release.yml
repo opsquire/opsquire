@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+
+  release:
+    name: tag, build, publish
+    needs: [checks, macos]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: The version the export brought, not released yet
+        id: version
+        run: |
+          version=$(python scripts/release.py version)
+          if gh api "repos/${{ github.repository }}/git/ref/tags/v$version" > /dev/null 2>&1; then
+            echo "::error::v$version is already released: export a new version first"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the export
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$(git rev-parse HEAD)" > /dev/null
+          git fetch -q origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
+          git checkout -q "v$VERSION"
+
+      - name: Build from the tagged commit
+        run: |
+          python -m pip install --quiet --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - name: Publish the GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git log -1 --format=%b HEAD | grep -v '^Exported from ' > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" dist/* --repo "${{ github.repository }}" --verify-tag \
+            --title "opsquire $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          echo "::notice title=Released::opsquire $VERSION: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"

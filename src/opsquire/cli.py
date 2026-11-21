@@ -1,0 +1,1934 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import asdict
+from pathlib import Path
+from types import FrameType
+from typing import Any, TextIO
+
+from . import (
+    __version__,
+    boundary,
+    contract,
+    doctor,
+    handover,
+    ledger,
+    locks,
+    piece,
+    policy,
+    reads,
+    repos,
+    runner,
+    store,
+    tend,
+)
+from .ageing import EXPIRE_DAYS, expire_unrun, reminder, told
+from .ask import TIERS, Budget, ask, configured_budget
+from .bootstrap import init
+from .close import auto_close, close_task, reopen_task, supersede_task
+from .docs import write_docs
+from .homegit import commit_quietly
+from .integrate import integrate
+from .judge import DUE_JOBS, DUE_MAX, due, judge, judge_all
+from .lint import lint_changed_scripts, lint_task, save_lint
+from .milestones import KINDS, milestones, render, since_arg
+from .model import (
+    DEFAULT_HOME,
+    GENERAL_ID_RE,
+    NO_UNDO,
+    OFFBOARDED,
+    OUTCOME_STATES,
+    STAGE_RE,
+    TASK_ID_RE,
+    TEMPLATES_DIR,
+    THREAD_RE,
+    Meta,
+    OpsquireError,
+    Task,
+    attach_zone,
+    code_version,
+    config_path,
+    configured_time_zone,
+    decision,
+    decision_text,
+    home_dir,
+    is_last_stage,
+    iso,
+    load_task,
+    main_home,
+    next_stage,
+    now,
+    pin_home,
+    resolve_task,
+    runs_dir,
+    shared_home,
+    shown,
+    stage_of,
+    update_config,
+    var_dir,
+    wall_clock,
+    write_json,
+    write_text,
+)
+from .offboard import (
+    daily_sweep,
+    days_text,
+    keep_days,
+    offboard_due,
+    offboard_named,
+    restore,
+    sweep_is_due_here,
+)
+from .plan import plan_meta, run_plan
+from .progress import duration
+from .query import (
+    SCRIPT_STATUSES,
+    TASK_STATUSES,
+    SearchIndex,
+    all_runs,
+    evaluate,
+    find,
+    find_run,
+    list_tasks,
+    reuse_candidates,
+    runs_for,
+    summarize,
+    wait_for_run,
+)
+from .runner import EXIT_CODES, load_run, run_task, tty_prompt
+from .share import listed, share
+from .state import state, waiting_on
+from .ui import DEFAULT_PORT, serve, url
+
+WAIT_DECIDED = 4
+AUDIT_SHOWN = 30
+
+
+def emit(data: Any, as_json: bool, table: list[list[str]] | None = None) -> None:
+    if as_json or table is None:
+        print(json.dumps(data, indent=2))
+        return
+    if not table:
+        print("(none)")
+        return
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
+
+
+def kebab(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def report_shared_targets(targets: list[str], exclude: str = "") -> list[dict[str, Any]]:
+    """Tell the agent what else waits for these targets; it is the agent's call whether the work is related."""
+    waiting = waiting_on(targets, exclude)
+    for it in waiting:
+        why = f" ({it['why']})" if it["why"] else ""
+        on = ", ".join(it["targets"])
+        print(f"opsquire: also waiting on {on}: {it['task_id']}, {it['next']} run{why}", file=sys.stderr)
+    if waiting:
+        print(
+            "opsquire: related runs on one machine go in one plan or task; withdraw what it replaces with "
+            "`opsquire handover <task> --withdraw`. Unrelated work stays separate: say so at handover.",
+            file=sys.stderr,
+        )
+    return waiting
+
+
+def refuse_unread(task_id: str | None) -> None:
+    """An agent hands over or creates work only after reading what its earlier work and this task's last run said."""
+    me = handover.author()
+    mine = reads.unread_results(me)
+    if mine:
+        first = mine[0]
+        raise OpsquireError(
+            f"refused: runs you handed over finished and you have not read them: {reads.describe(mine)}. Read them "
+            f"first (`opsquire wait {first.get('task_id')} --json` or `opsquire log {first.get('run_id')}`)"
+        )
+    latest = reads.unread_latest(task_id, me) if task_id else None
+    if latest:
+        raise OpsquireError(
+            f"not handed over: read the task's latest run first, {reads.describe([latest])}: "
+            f"`opsquire runs {task_id} --json`, then `opsquire log {latest.get('run_id')}`"
+        )
+
+
+def cmd_doctor(a: argparse.Namespace) -> int:
+    if a.boundary:
+        kept, checks = boundary.probe()
+        if a.json:
+            emit({"ok": kept, "checks": checks}, True)
+        else:
+            print("\n".join(checks))
+        return 0 if kept else 1
+    ok, lines = doctor.report(handover.author())
+    if a.json:
+        emit({"ok": ok, "checks": lines, "consoles": doctor.consoles()}, True)
+    else:
+        print("\n".join(lines))
+    return 0 if ok else 1
+
+
+def cmd_share(a: argparse.Namespace) -> int:
+    """Give the home to a group of operators: everything in it, and all they create there later, is theirs to read
+    and write."""
+    if sys.platform == "darwin":
+        raise OpsquireError("shared homes need Linux: a Mac drops the setgid bit that keeps new folders the group's")
+    home = main_home()
+    if not home.is_dir():
+        raise OpsquireError(f"no home at {home}")
+    done = share(home, a.group, a.dry)
+    verb = "would change" if a.dry else "changed"
+    print(f"opsquire share: {home} for group {a.group}: {verb} {done.changed} paths, {done.right} already right")
+    if done.linked:
+        print(
+            f"opsquire share: left {len(done.linked)} files hard-linked from outside the home "
+            f"({listed(home, done.linked)}): sharing them would share the outside file too; replace each with a copy",
+            file=sys.stderr,
+        )
+    if done.not_mine:
+        print(
+            f"opsquire share: left {len(done.not_mine)} paths other operators own ({listed(home, done.not_mine)}); "
+            f"each of them runs `opsquire share {a.group}` for their own",
+            file=sys.stderr,
+        )
+    return 1 if done.linked or done.not_mine else 0
+
+
+def cmd_compact(a: argparse.Namespace) -> int:
+    """Share repeated snapshot files and gzip the logs of runs finished for a day, then bring the find index up to
+    date (agents cannot write it, so the operator's side keeps it warm for them); at most one at a time."""
+    lock = var_dir() / "compact.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if not a.quiet:
+                print("opsquire: a compaction is already running")
+            return 0
+        done = store.compact(runs_dir(), now())
+        with contextlib.suppress(OSError, OpsquireError):
+            SearchIndex()
+    write_json(var_dir() / "compact.json", {"at": iso(now()), **asdict(done)})
+    if not a.quiet or done.errors:
+        print(done.text(), file=sys.stdout if not a.quiet else sys.stderr)
+        for e in done.errors[:10]:
+            print(f"  {e}", file=sys.stderr)
+    return 0
+
+
+def cmd_unread(a: argparse.Namespace) -> int:
+    if a.hook:
+        answer = reads.stop_hook(sys.stdin.read())
+        if answer:
+            print(json.dumps(answer))
+        return 0
+    recs = reads.unread_results(a.author or handover.author())
+    emit(recs, a.json, run_table(recs))
+    return 1 if recs else 0
+
+
+def cmd_new(a: argparse.Namespace) -> int:
+    if not a.plan:
+        refuse_unread(None)
+    t = now()
+    name = f"{a.area}_{a.name}" if a.general else f"{t:%Y%m%d-%H%M}_{a.area}_{a.name}"
+    if not (GENERAL_ID_RE if a.general else TASK_ID_RE).match(name):
+        parts = (("area", a.area), ("name", a.name))
+        wrong = [f"{label} {value!r}, use {kebab(value)!r}" for label, value in parts if kebab(value) != value]
+        hint = " A host name with underscores keeps its spelling in --target." if "_" in a.area else ""
+        raise OpsquireError(
+            f"nothing created: area and name must be lowercase kebab-case: {'; '.join(wrong) or name}.{hint}"
+        )
+    folder = home_dir() / "general" / name if a.general else home_dir() / "tasks" / f"{t:%Y-%m}" / name
+    if folder.exists():
+        raise OpsquireError(f"{folder} already exists")
+    if a.general and (home_dir() / OFFBOARDED / "general" / name).exists():
+        raise OpsquireError(f"{name} exists and is offboarded: `opsquire restore {name}` brings it back")
+    stages = a.stage or []
+    if stages and (len(stages) < 2 or len(set(stages)) != len(stages) or not all(STAGE_RE.match(x) for x in stages)):
+        raise OpsquireError("nothing created: --stage takes two or more distinct lowercase names, in order")
+    if stages and not a.changes_prod:
+        raise OpsquireError("nothing created: only a changing task runs in stages (--changes-prod)")
+    if a.changes_prod and not a.rollback and not a.plan:
+        raise OpsquireError("--rollback is required with --changes-prod")
+    if a.changes_prod and a.rollback and a.rollback.strip().lower().rstrip(".") in NO_UNDO:
+        raise OpsquireError("nothing created: --rollback must say how to undo the change")
+    created_parents = [p for p in reversed(folder.parents) if not p.exists()]
+    staging = folder.with_name(f".{name}.{os.getpid()}.tmp")
+    try:
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        staging.mkdir()
+        build_task(a, name, t, staging)
+        staging.rename(folder)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        for parent in reversed(created_parents):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+        raise
+    if not a.json:
+        print(folder)
+    if a.hold:
+        handover.hold(load_task(folder), a.hold, handover.author())
+    waiting = report_shared_targets(a.target or [a.area], name)
+    reuse = [] if a.general or a.plan else reuse_candidates(a.area, a.name, a.purpose, a.uses or [])
+    for hit in reuse:
+        print(f"opsquire: maybe reuse general/{hit['id']}: {hit['purpose']}", file=sys.stderr)
+    tell_author()
+    if a.json:
+        out = {"id": name, "path": str(folder), "waiting_on_same_target": waiting}
+        emit(out | {"reuse_candidates": [{k: h[k] for k in ("id", "purpose", "score")} for h in reuse]}, True)
+    return 0
+
+
+def build_task(a: argparse.Namespace, name: str, t: dt.datetime, folder: Path) -> None:
+    if a.thread and not THREAD_RE.match(a.thread):
+        raise OpsquireError("--thread must be a lowercase kebab-case name of at most 40 characters")
+    if a.plan:
+        build_plan(a, name, t, folder)
+        return
+    entry = f"main.{a.lang}"
+    if a.lang == "py":
+        shape = "main" if a.changes_prod else "read"
+        shutil.copyfile(TEMPLATES_DIR / f"{shape}.py", folder / entry)
+        if a.changes_prod and not a.general:
+            shutil.copyfile(TEMPLATES_DIR / "test_main.py", folder / "test_main.py")
+    else:
+        shutil.copyfile(TEMPLATES_DIR / entry, folder / entry)
+    if not a.general:
+        design = (TEMPLATES_DIR / "design.md").read_text()
+        write_text(folder / "design.md", design.replace("{id}", name).replace("{purpose}", a.purpose))
+    verify = None
+    if a.changes_prod and not a.general and not a.no_verify:
+        verify = f"verify.{a.lang}"
+        shutil.copyfile(TEMPLATES_DIR / verify, folder / verify)
+    meta = Meta(
+        id=name,
+        kind="general" if a.general else "task",
+        created=iso(t),
+        author=a.author or os.environ.get("OPSQUIRE_AUTHOR", "unknown"),
+        purpose=a.purpose,
+        area=a.area,
+        entry=entry,
+        changes_prod=a.changes_prod,
+        targets=a.target or [a.area],
+        lock=a.lock or ("exclusive" if a.changes_prod else "shared"),
+        lock_reason=a.lock_reason or "",
+        credentials=dict(c.split("=", 1) for c in a.cred or []),
+        uses=a.uses or [],
+        rollback=a.rollback or "read-only",
+        links=a.link or [],
+        interpreter=a.interpreter,
+        thread=a.thread,
+        verify=verify,
+        stages=a.stage,
+    )
+    write_json(folder / "meta.json", meta.to_json())
+
+
+def build_plan(a: argparse.Namespace, name: str, t: dt.datetime, folder: Path) -> None:
+    if not a.step:
+        raise OpsquireError("a plan needs at least one --step <task-id>, in order")
+    steps = [{"task": resolve_task(s).id} for s in a.step]
+    author = a.author or os.environ.get("OPSQUIRE_AUTHOR", "unknown")
+    meta = plan_meta(name, t, a.area, a.purpose, author, steps, a.rollback, a.link or [], a.thread)
+    write_json(folder / "meta.json", meta.to_json())
+
+
+def cmd_lint(a: argparse.Namespace) -> int:
+    task = resolve_task(a.task)
+    result = lint_task(task)
+    save_lint(task, result)
+    scripts = lint_changed_scripts(task)
+    failing = sorted(s for s, r in scripts.items() if not r.ok)
+    if a.json:
+        data = {"id": task.id, "ok": result.ok, "content_hash": result.content_hash, "output": result.output}
+        emit(data | {"scripts": {s: r.ok for s, r in scripts.items()}}, True)
+    else:
+        print(result.output)
+        for script in failing:
+            print(f"\n== general script {script}, on its own\n{scripts[script].output}")
+        tests = f" ({result.tests} tests)" if result.tests else ""
+        print(f"\n{task.id}: {'LINT OK' if result.ok else 'LINT FAILED'}{tests}")
+        for script, checked in scripts.items():
+            print(f"{script}: {'LINT OK' if checked.ok else 'LINT FAILED'} (general script, changed since its lint)")
+    if failing:
+        return 1
+    if result.ok:
+        uses = [home_dir() / "general" / u for u in (task.meta.uses if task.meta else [])]
+        note = commit_quietly(home_dir(), [task.folder, *uses], f"ready: {task.id}")
+        if note:
+            print(note, file=sys.stderr)
+    return 0 if result.ok else 1
+
+
+def cmd_hold(a: argparse.Namespace) -> int:
+    task = resolve_task(a.task)
+    if a.release:
+        released = handover.release(task)
+        print(f"{task.id}: back in the inbox when it has a run to offer" if released else f"{task.id}: not held")
+        return 0
+    if not (a.why or "").strip():
+        raise OpsquireError('say why it waits: opsquire hold <task> --why "..." [--until 15:00]')
+    until = parse_until(a.until, configured_time_zone()) if a.until else None
+    entry = handover.hold(task, a.why, handover.author(), until)
+    commit_quietly(home_dir(), [task.folder], f"hold: {task.id}")
+    lasts = (
+        f" until {shown(entry['until'], configured_time_zone(), seconds=False)}"
+        if until
+        else " until it is handed over"
+    )
+    print(f"{task.id}: held out of the inbox{lasts}; why: {entry['why']}")
+    return 0
+
+
+def parse_until(text: str, zone: str) -> dt.datetime:
+    """An HH:MM in the display zone (today, or tomorrow when it has passed; HH:MMZ is UTC) or an ISO time, read in
+    the display zone when it names none."""
+    at = now()
+    clock = re.match(r"^(\d{1,2}):(\d{2})(Z?)$", text)
+    if clock:
+        hh, mm = int(clock.group(1)), int(clock.group(2))
+        if hh > 23 or mm > 59:
+            raise OpsquireError(f"--until {text!r}: not a time of day")
+        when = wall_clock(at, hh, mm, "UTC" if clock.group(3) else zone)
+        if when <= at:
+            when = wall_clock(at + dt.timedelta(days=1), hh, mm, "UTC" if clock.group(3) else zone)
+        return when.astimezone(dt.UTC)
+    try:
+        when = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise OpsquireError(f"--until {text!r}: use HH:MM (display zone) or an ISO time") from None
+    return (attach_zone(when, zone) if when.tzinfo is None else when).astimezone(dt.UTC)
+
+
+def cmd_supersede(a: argparse.Namespace) -> int:
+    done = supersede_task(a.task, a.by, a.note or "")
+    if a.json:
+        emit(done, True)
+    else:
+        print(f"{done['id']}: superseded by {done['superseded_by']}; out of the inbox and refused by run")
+    return 0
+
+
+def cmd_reopen(a: argparse.Namespace) -> int:
+    done = reopen_task(a.task, a.note)
+    if a.json:
+        emit(done, True)
+    else:
+        print(f"{done['id']}: open again")
+    return 0
+
+
+def tell_author() -> None:
+    """The agent that runs new or handover hears what became of its earlier tasks: decided by someone else, or
+    waiting too long. Never the reason the command fails."""
+    try:
+        lines = told(handover.author())
+    except (OpsquireError, OSError, ValueError):
+        return
+    for line in lines:
+        print(f"opsquire: {line}", file=sys.stderr)
+
+
+def cmd_close(a: argparse.Namespace) -> int:
+    """Record how a task really ended: done, partial or abandoned, with a note (what was finished by hand, which
+    run landed). Only annotates meta.json; touches no host. The catalog and `ls` show the state from then on."""
+    closed = close_task(a.task, a.outcome, a.note, a.run)
+    if a.json:
+        emit({"id": closed["id"], "outcome": a.outcome, "notes": closed["notes"]}, True)
+        return 0
+    print(f"{closed['id']}: closed {a.outcome}")
+    for note in closed["notes"]:
+        print(note, file=sys.stderr)
+    return 0
+
+
+def cmd_run(a: argparse.Namespace) -> int:
+    pin_home()
+    if a.verbose:
+        runner.VERBOSE = True
+    task = resolve_task(a.task)
+    skip_dry = (a.skip_dry or "").strip()
+    wait = not a.no_wait
+    if a.skip_dry is not None and not (a.apply and skip_dry):
+        raise OpsquireError('--skip-dry goes with --apply and needs the reason: --skip-dry "why no dry run"')
+    if a.dry_first and (not a.apply or a.skip_dry is not None or a.verify):
+        raise OpsquireError("--dry-first goes with --apply alone: it runs the dry run, then the apply if that ended ok")
+    versioned = [home_dir() / sub for sub in ("tasks", "general", OFFBOARDED)]
+    note = commit_quietly(home_dir(), versioned, f"before running {task.id}")
+    if note:
+        print(f"opsquire: {note}", file=sys.stderr)
+    since = iso(now())
+    if task.kind == "plan":
+        if a.script_args:
+            raise OpsquireError("plans take no arguments after --; put them on the steps in meta.json")
+        if a.verify and a.apply:
+            raise OpsquireError("--verify runs every step's verify check; it does not go with --apply")
+        code = dry_first(lambda: run_plan(task, False, a.break_lock, wait=wait), a) or run_plan(
+            task, a.apply, a.break_lock, skip_dry, a.verify, a.from_start, wait
+        )
+    elif a.from_start:
+        raise OpsquireError("--from-start is for plans: it runs every step again instead of resuming")
+    elif pipeline(task, a):
+        code, a.script_args = run_stages(task, a.break_lock, wait)
+    else:
+        code = dry_first(lambda: run_task(task, False, a.script_args, a.break_lock, wait=wait), a) or run_task(
+            task, a.apply, a.script_args, a.break_lock, a.verify, skip_dry, wait
+        )
+    last_stage = task.meta is None or is_last_stage(task.meta, a.script_args)
+    if a.apply and code == 0 and task.kind != "plan" and task.meta and task.meta.verify and last_stage:
+        # A staged task (build, then deploy) ends ok after every stage; only its verify check knows the end state.
+        print(f"opsquire: apply ok; running the verify check of {task.id} before closing it")
+        verified = run_task(task, False, [] if task.meta.stages else a.script_args, False, True)
+        if verified != 0:
+            print("opsquire: the verify check did not finish ok; the task stays open")
+            code = verified
+    if a.apply and code == 0 and not last_stage and task.meta and task.meta.stages:
+        done = stage_of(task.meta, a.script_args)
+        nxt = next_stage(task.meta, runs_for(task.id))
+        print(f"opsquire: stage {done} applied; `opsquire run {task.id} --apply` runs the rest from stage {nxt}")
+    with contextlib.suppress(OSError, OpsquireError):
+        SearchIndex()
+    if (a.apply or a.verify) and code == 0 and last_stage:
+        steps = [str(s["task"]) for s in (task.meta.steps if task.meta else None) or []]
+        closed = [t for t in [task.id, *steps] if auto_close(t, since)]
+        if task.kind == "plan" and a.apply:
+            closed += [t for t, began in resumed_steps(task.id).items() if t not in closed and auto_close(t, began)]
+        if closed:
+            print(f"closed done: {', '.join(closed)} (auto, from the run record; `opsquire close` can amend it)")
+    return code
+
+
+def dry_first(dry: Callable[[], int], a: argparse.Namespace) -> int:
+    """With --dry-first, the dry run of the same scripts and arguments; the apply follows only when it ended ok (0).
+    A staged task's walk already pairs each stage's dry run with its apply."""
+    if not a.dry_first:
+        return 0
+    print("opsquire: dry run first; the apply follows only if it ends ok")
+    code = dry()
+    if code:
+        print("opsquire: the dry run did not end ok; the apply did not run")
+    return code
+
+
+def resumed_steps(plan_id: str) -> dict[str, str]:
+    """{step task: when its own apply started} for the steps the plan's last run took as done from an earlier,
+    stopped apply: they close with the schedule from the run that did them."""
+    runs = runs_for(plan_id)
+    last = runs[-1] if runs else {}
+    out: dict[str, str] = {}
+    for step in last.get("steps") or []:
+        if step.get("done_in") and step.get("run_id"):
+            own = next((r for r in runs_for(str(step["task"])) if r.get("run_id") == step["run_id"]), None)
+            if own and own.get("started"):
+                out[str(step["task"])] = str(own["started"])
+    return out
+
+
+def pipeline(task: Task, a: argparse.Namespace) -> bool:
+    """`run <staged task> --apply` with no arguments walks every stage left."""
+    return bool(task.meta and task.meta.stages and a.apply and not a.script_args and not a.verify and not a.skip_dry)
+
+
+def run_stages(task: Task, break_lock: bool, wait: bool = True) -> tuple[int, list[str]]:
+    """Each stage still to apply, in order: its dry run, then its apply (covered by that dry run, its own question
+    showing that stage's plan). Stops at the first run that does not end ok. Returns that code and the stage's args,
+    so what follows (the verify check, the close) runs only after the last stage."""
+    assert task.meta and task.meta.stages
+    stages = task.meta.stages
+    start = stages.index(next_stage(task.meta, runs_for(task.id)) or stages[0])
+    if start == len(stages) - 1 and task.raw.get("outcome"):
+        raise OpsquireError(f"{task.id} is closed; every stage ran")
+    for i, stage in enumerate(stages[start:], start + 1):
+        for apply in (False, True):
+            print(f"opsquire: stage {i}/{len(stages)} {stage}: {'apply' if apply else 'dry run'}")
+            code = run_task(task, apply, [stage], break_lock, wait=wait)
+            if code:
+                print(
+                    f"opsquire: stopped at stage {stage} ({'apply' if apply else 'dry run'}); later stages did not run"
+                )
+                return code, [stage]
+    return 0, [stages[-1]]
+
+
+def cmd_handover(a: argparse.Namespace) -> int:
+    task = resolve_task(a.task)
+    if a.withdraw:
+        withdrawn = handover.withdraw(task)
+        if a.json:
+            emit({"id": task.id, "withdrawn": withdrawn}, True)
+        else:
+            print(f"{task.id}: handover withdrawn" if withdrawn else f"{task.id}: no handover to withdraw")
+        return 0
+    refuse_unread(task.id)
+    mode = handover.mode_for(task, a.apply, a.verify)
+    runs = runs_for(task.id)
+    same = handover.same_apply(task, runs, a.script_args) if mode == "apply" else None
+    if same and not (a.again and (a.why or "").strip()):
+        raise OpsquireError(
+            f"not handed over: {handover.applied_text(same)}. Read that record first; if production really needs "
+            f'it again (after a rollback, say), pass --again --why "the reason"'
+        )
+    uncovered = handover.needs_dry(task, runs, a.script_args) if mode == "apply" else None
+    if uncovered:
+        raise OpsquireError(f"not handed over: {uncovered}")
+    unready = handover.lint_ok(task)
+    if unready:
+        raise OpsquireError(f"not handed over: {unready}")
+    edited = handover.changed_since_run(task, runs)
+    if edited and not (a.changed or "").strip():
+        raise OpsquireError(
+            f"not handed over: its code changed since its last run ({', '.join(edited)}). Say what changed, in plain "
+            'words the operator reads in the inbox: --changed "skips web3 now"'
+        )
+    entry = handover.record(
+        task, mode, a.script_args, a.why or "", handover.author(), again=bool(same), changed=a.changed or ""
+    )
+    cmd = handover.command(task.id, mode, a.script_args)
+    targets = task.meta.targets if task.meta else []
+    if a.json:
+        waiting = report_shared_targets(targets, task.id)
+        emit({"id": task.id, "command": cmd, "handover": entry, "waiting_on_same_target": waiting}, True)
+    else:
+        print(f"handed over: {cmd}\n  in the inbox until it runs" + (f"; why: {entry['why']}" if entry["why"] else ""))
+        report_shared_targets(targets, task.id)
+    tell_author()
+    return 0
+
+
+def cmd_ls(a: argparse.Namespace) -> int:
+    rows = [
+        t
+        for t in list_tasks()
+        if (not a.area or t["area"] == a.area)
+        and (not a.status or t["status"] == a.status)
+        and (not a.kind or t["kind"] == a.kind)
+    ]
+    table = [["STATUS", "ID", "LAST RUN", "PURPOSE"]] + [
+        [
+            t["status"],
+            t["id"],
+            f"{t['last_run']['status']} {t['last_run']['mode']} {t['last_run']['started']}" if t["last_run"] else "-",
+            str(t["purpose"] or "")[:70],
+        ]
+        for t in rows
+    ]
+    emit(rows, a.json, table if rows else [])
+    return 0
+
+
+def cmd_inbox(a: argparse.Namespace) -> int:
+    """What waits on the operator, as the console's Inbox shows it: the next run of each task (a plan's steps
+    under it), and the chats with a reply not opened yet."""
+    built = state()
+    asks = {str(x.get("conversation")): x for x in built["asks"]}
+    chats = [
+        {
+            "conversation": c,
+            "prompt": (asks.get(c) or {}).get("prompt") or "",
+            "ended": (asks.get(c) or {}).get("ended"),
+        }
+        for c in built["unread_chats"]
+    ]
+    if a.json:
+        emit({"inbox": built["inbox"], "preparing": built["preparing"], "unread_chats": chats}, True)
+        return 0
+    rows = [["NEXT", "WAITING", "TASK", "RUN"]]
+    for item in built["inbox"]:
+        for n, it in enumerate([item, *(item.get("steps") or [])]):
+            waited = f"{it['waiting_days']:.1f}d" if it.get("waiting_days") is not None else "-"
+            if n and it.get("locked_in"):
+                rows.append([f"{it['i']}.", it.get("state") or "", "  " + str(it["task_id"]), "runs in the schedule"])
+                continue
+            rows.append([it["next"], waited, ("  " if n else "") + str(it["task_id"]), str(it["command"])])
+    emit(None, False, rows if len(rows) > 1 else [])
+    for it in built["inbox"]:
+        if it.get("stale"):
+            print(f"  {it['task_id']}: {it['stale']}")
+    if built["preparing"]:
+        print(f"\nbeing prepared ({len(built['preparing'])}), not handed over since their last edit:")
+        for p in built["preparing"]:
+            print(f"  {p['task_id']}  by {p['author'] or '?'}")
+    if chats:
+        print(f"\nunread chats ({len(chats)}), open them in the console:")
+        for c in chats:
+            print(f"  {c['conversation']}  {str(c['prompt']).splitlines()[0][:80] if c['prompt'] else ''}")
+    return 0
+
+
+def cmd_show(a: argparse.Namespace) -> int:
+    task = resolve_task(a.task, offboarded=True)
+    data = summarize(task) | {"meta": task.raw, "run_history": runs_for(task.id)}
+    reads.mark_records(handover.author(), data["run_history"])
+    if a.json:
+        emit(data, True)
+        return 0
+    print(json.dumps(task.raw, indent=2))
+    if task.errors:
+        print("\nmeta errors:\n  " + "\n  ".join(task.errors))
+    print(f"\nstatus: {data['status']}   folder: {task.folder}")
+    emit(None, False, run_table(data["run_history"]))
+    return 0
+
+
+def run_table(recs: list[dict[str, Any]]) -> list[list[str]]:
+    if not recs:
+        return []
+    zone = configured_time_zone()
+    return [["STATUS", "MODE", "ORIGIN", "STARTED", "SCRIPT", "TASK", "TARGETS", "LAST ERROR"]] + [
+        [
+            "waiting" if question(r) else str(r.get("status")),
+            str(r.get("mode")),
+            str(r.get("origin") or "-"),
+            shown(r.get("started"), zone),
+            code_version(r.get("files") or {})[:7] or "-",
+            str(r.get("task_id")),
+            " ".join(f"{k}={v['status']}" for k, v in (r.get("targets") or {}).items()),
+            f"asks the operator: {question(r)}"[:80] if question(r) else str(r.get("last_error") or "")[:60],
+        ]
+        for r in recs
+    ]
+
+
+def question(rec: dict[str, Any]) -> str:
+    """What a running run is waiting for the operator to answer, if anything."""
+    return str((rec.get("waiting") or {}).get("question") or "") if rec.get("status") == "running" else ""
+
+
+def cmd_runs(a: argparse.Namespace) -> int:
+    since = since_arg(a.since, now(), configured_time_zone()) if a.since else ""
+    recs = runs_for(resolve_task(a.task, offboarded=True).id) if a.task else all_runs()
+    recs = [
+        r
+        for r in recs
+        if (not a.status or r.get("status") == a.status)
+        and (not a.area or r.get("area") == a.area)
+        and (not since or str(r.get("started")) >= since)
+    ][-a.limit :]
+    emit(recs, a.json, run_table(recs))
+    reads.mark_records(handover.author(), recs)
+    return 0
+
+
+def cmd_last(a: argparse.Namespace) -> int:
+    recs = all_runs()
+    if not recs:
+        raise OpsquireError("no runs yet")
+    rec = recs[-1]
+    reads.mark_records(handover.author(), [rec])
+    if a.json:
+        emit(rec, True)
+        return 0
+    emit(None, False, run_table([rec]))
+    print(f"\nrun dir: {rec['paths']['dir']}")
+    return 0
+
+
+def cmd_log(a: argparse.Namespace) -> int:
+    path = find_run(a.run)
+    if path is None:
+        task_runs = runs_for(resolve_task(a.run, offboarded=True).id)
+        if not task_runs:
+            raise OpsquireError(f"no runs for {a.run!r}")
+        path = home_dir() / task_runs[-1]["paths"]["dir"]
+    text = store.read_log(path, "events.jsonl" if a.events else "output.log").decode("utf-8", "replace")
+    if a.events and a.json:
+        print(json.dumps([json.loads(line) for line in text.splitlines()], indent=2))
+    else:
+        sys.stdout.write(text)
+    rec = load_run(path / "run.json")
+    reads.mark_records(handover.author(), [rec])
+    if not a.events:
+        print(f"\n--- status={rec['status']} exit={rec.get('exit_code')} origin={rec.get('origin') or '-'} run={path}")
+        if question(rec):
+            print(f"--- waiting for the operator to answer: {question(rec)}")
+    return 0
+
+
+def cmd_find(a: argparse.Namespace) -> int:
+    if a.eval:
+        if a.words:
+            raise OpsquireError("find --eval takes no words: it builds its queries from this home's tasks")
+        return print_eval(evaluate(), a.json)
+    if not a.words:
+        raise OpsquireError("find needs words to search for (or --eval to score the ranking)")
+    found = find(" ".join(a.words), a.limit)
+    if a.json:
+        emit(found, True)
+        return 0
+    zone = configured_time_zone()
+    print("Scripts to reuse")
+    rows = [["SCORE", "STATUS", "USERS", "RUNS", "OK", "ID", "PURPOSE"]] + [
+        [
+            f"{h['score']:.1f}",
+            h["status"] + (", offboarded" if h["offboarded"] else ""),
+            str(h["users"]),
+            str(h["track"]["runs"]),
+            "-" if h["track"]["ok_rate"] is None else f"{h['track']['ok_rate']:.0%}",
+            h["id"],
+            str(h["purpose"] or "")[:70],
+        ]
+        for h in found["reuse"]
+    ]
+    details = [how_note(h, zone) for h in found["reuse"]]
+    print_rows(rows, ["", *details])
+    print("\nPast tasks like this")
+    rows = [["SCORE", "STATUS", "RUNS", "OK", "ID", "NOTE", "PURPOSE"]] + [
+        [
+            f"{h['score']:.1f}",
+            h["status"] + (", offboarded" if h["offboarded"] else ""),
+            str(h["track"]["runs"]),
+            "-" if h["track"]["ok_rate"] is None else f"{h['track']['ok_rate']:.0%}",
+            h["id"],
+            find_note(h),
+            str(h["purpose"] or "")[:70],
+        ]
+        for h in found["history"]
+    ]
+    print_rows(rows, [])
+    if found["hint"]:
+        print(f"\nhint: {found['hint']['text']}")
+    return 0
+
+
+def print_rows(rows: list[list[str]], details: list[str]) -> None:
+    """An aligned table, each row followed by its detail line (if any), indented under the second column."""
+    if len(rows) < 2:
+        print("(none)")
+        return
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for i, row in enumerate(rows):
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
+        if i < len(details) and details[i]:
+            print(" " * (widths[0] + 2) + details[i])
+
+
+def how_note(hit: dict[str, Any], zone: str) -> str:
+    """How to call a general script, in one line: its arguments, the latest ok run of a task using it, the typical
+    duration, and its latest failure."""
+    parts = [f"args: {clip(hit['usage'], 100)}"] if hit["usage"] else []
+    if not hit["usage"] and hit["doc"]:
+        parts.append(f"API: docs/{hit['id']}.md")
+    ex = hit["example"]
+    if ex:
+        argv = f" with {clip(' '.join(map(str, ex['argv'])), 60)}" if ex["argv"] else ""
+        parts.append(f"e.g. {ex['task']} ({ex['mode']} ok {shown(ex['started'], zone, seconds=False)}{argv})")
+    if hit["typical_s"] is not None:
+        parts.append(f"typically {duration(hit['typical_s'])}")
+    fail = hit["last_failure"]
+    if fail:
+        why = clip(str(fail["last_error"] or "failed"), 50)
+        parts.append(f"last failed {shown(fail['started'], zone, seconds=False)}: {why}")
+    return "; ".join(parts) if parts else "no args, runs or doc recorded"
+
+
+def clip(text: str, width: int) -> str:
+    """Text on one line, cut to `width` with "..." when longer."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[: width - 3].rstrip() + "..."
+
+
+def print_eval(result: dict[str, Any], as_json: bool) -> int:
+    if as_json:
+        emit(result, True)
+        return 0
+    helpers = ", ".join(result["helpers_left_out"]) or "none"
+    print(f"{result['cases']} cases: tasks that use a general script (broad helpers left out: {helpers})")
+    if not result["cases"]:
+        return 0
+    recall = "  ".join(f"recall{k} {v:.2f}" for k, v in result["recall"].items())
+    print(f"{recall}  MRR {result['mrr']:.3f}")
+    if result["worst"]:
+        print("worst-served general scripts (ranked below 5 or not found):")
+    for w in result["worst"]:
+        ex = w["example"]
+        found = f"rank {ex['rank']}" if ex["rank"] else "not found"
+        print(f"  {w['general']}: {w['missed']} of {w['cases']}, e.g. {ex['task']} ({found}): {ex['query']}")
+    return 0
+
+
+def find_note(hit: dict[str, Any]) -> str:
+    """The general script a hit uses (and how many more), and why its last run failed."""
+    uses = hit["uses"]
+    parts = [f"-> {uses[0]}" + (f" +{len(uses) - 1}" if len(uses) > 1 else "")] if uses else []
+    if hit["last_failure"]:
+        parts.append(f"failed: {' '.join(hit['last_failure'].split())[:40]}")
+    return "; ".join(parts)
+
+
+def cmd_offboard(a: argparse.Namespace) -> int:
+    """Move settled tasks out of tasks/ into offboarded/: the named ones now, or with --due every one that sat idle
+    for the retention period (what the daily sweep does). Nothing is deleted; `opsquire restore` brings one back."""
+    if bool(a.task) == a.due:
+        raise OpsquireError("name the tasks to offboard now, or pass --due for every settled task past the retention")
+    if a.days is not None and not a.due:
+        raise OpsquireError("--days goes with --due; a named task is offboarded whatever its age")
+    days = keep_days() if a.days is None else a.days
+    if a.due and a.days is None and days <= 0:
+        raise OpsquireError("automatic offboarding is off for this home (retention 0); pass --days N")
+    if days < 0:
+        raise OpsquireError("--days cannot be negative")
+    moved = offboard_due(days=days, dry=a.dry) if a.due else offboard_named(a.task, a.dry)
+    if a.json:
+        emit({"offboarded": [] if a.dry else moved, "would_offboard": moved if a.dry else [], "days": days}, True)
+        return 0
+    verb = "would offboard" if a.dry else "offboarded"
+    age = f" idle {days_text(days)}+ days" if a.due else ""
+    print(f"{verb} {len(moved)}{age}" + (":" if moved else ""))
+    for tid in moved:
+        print(f"  {tid}")
+    return 0
+
+
+def cmd_restore(a: argparse.Namespace) -> int:
+    restored = restore(a.task)
+    if a.json:
+        emit({"restored": restored}, True)
+        return 0
+    print("restored: " + ", ".join(restored))
+    return 0
+
+
+def sweep_after_command() -> None:
+    """Once a day `new`, `lint` and `run` also expire tasks that never ran, offboard settled tasks past the retention,
+    compact run storage, prune idle chat repo copies and count the inbox items that wait for a decision. Never the
+    reason a command fails: a home it cannot write keeps its tasks until the next command that can."""
+    at = now()
+    due = sweep_is_due_here(at)
+    if due:
+        try:
+            expired = expire_unrun(at)
+        except (OpsquireError, OSError) as e:
+            expired = []
+            print(f"opsquire: unrun tasks not expired this time: {str(e).splitlines()[0]}", file=sys.stderr)
+        if expired:
+            print(
+                f"opsquire: abandoned {len(expired)} tasks that never ran in {EXPIRE_DAYS:g} days: "
+                f'{", ".join(expired)} (`opsquire reopen <task> --note "why"` undoes one)',
+                file=sys.stderr,
+            )
+    try:
+        moved = daily_sweep(at)
+    except (OpsquireError, OSError) as e:
+        print(f"opsquire: settled tasks not offboarded this time: {str(e).splitlines()[0]}", file=sys.stderr)
+        return
+    if due:
+        with contextlib.suppress(OpsquireError, OSError, ValueError):
+            note = reminder(state(at))
+            if note:
+                print(f"opsquire: {note}", file=sys.stderr)
+    if moved:
+        print(
+            f"opsquire: offboarded {len(moved)} settled tasks idle {days_text(keep_days())}+ days "
+            "(`opsquire find` still finds them, `opsquire restore <task>` brings one back)",
+            file=sys.stderr,
+        )
+    if due and keep_days() > 0:
+        try:
+            pruned = repos.prune_chat_copies(keep_days())
+        except (OpsquireError, OSError) as e:
+            print(f"opsquire: chat repo copies not pruned this time: {str(e).splitlines()[0]}", file=sys.stderr)
+            return
+        if any(not c.get("leftover") for c in pruned["removed"]) or pruned["kept"]:
+            sys.stderr.write("opsquire: ")
+            print_prune(pruned, keep_days(), False, sys.stderr)
+
+
+def cmd_approve_server(a: argparse.Namespace) -> int:
+    from . import approve
+    from .ask import pick_agent
+
+    agent = pick_agent(a.agent or None)[1]
+    approve.serve(a.ask, {**(agent.get("tools") or {}), "allowed": agent.get("allowed_tools") or []})
+    return 0
+
+
+def cmd_tend(a: argparse.Namespace) -> int:
+    rep = tend.report()
+    if not a.fix:
+        print(json.dumps(rep, indent=2) if a.json else tend.text(rep))
+        return 0
+    if not tend.fixable(rep):
+        print("opsquire: nothing for an agent to fix")
+        return 0
+    parked = tend.unfinished_upkeep()
+    if parked:
+        print(
+            f"opsquire: the last upkeep ask, {parked['ask_id']}, ended {parked['status']}; a new one would redo its"
+            f" work. Continue it: opsquire ask --resume {parked['ask_id']}",
+            file=sys.stderr,
+        )
+        return 2
+    return cmd_ask(
+        argparse.Namespace(
+            request=[tend.brief(rep)],
+            task=None,
+            resume=None,
+            agent=a.agent,
+            new=False,
+            fresh=False,
+            no_grill=True,
+            no_split=False,
+            max_agents=tend.FIX_MAX_AGENTS,
+            budget=a.budget if a.budget is not None else tend.FIX_BUDGET_USD,
+            strict_budget=True,
+            model=a.model,
+        )
+    )
+
+
+def cmd_ask(a: argparse.Namespace) -> int:
+    pin_home()
+    task_id = resolve_task(a.task).id if a.task else None
+    if a.fresh and not (a.resume and a.request):
+        raise OpsquireError("--fresh starts a new agent session in the conversation of --resume, with your request")
+    if not a.request and not a.resume:
+        raise OpsquireError('say what you want, e.g. opsquire ask "restart the workers on host x"')
+    if a.max_agents is not None and a.max_agents < 1:
+        raise OpsquireError("--max-agents must be at least 1")
+    res = ask(
+        " ".join(a.request) or "Continue where we stopped.",
+        a.agent,
+        task_id,
+        a.new,
+        a.resume,
+        not a.no_grill,
+        split=not a.no_split,
+        max_agents=a.max_agents,
+        budget=Budget(a.budget if a.budget is not None else configured_budget(), a.strict_budget),
+        reply_given=bool(a.request),
+        model=a.model or "",
+        fresh=a.fresh,
+    )
+    if res.pieces:
+        print(res.text.strip())
+        if res.interrupted or res.waiting:
+            print(f"\nopsquire: continue with: opsquire ask --resume {res.ask_id}", file=sys.stderr)
+        if res.cost_usd:
+            print(f"opsquire: ${res.cost_usd:.2f} spent", file=sys.stderr)
+        return EXIT_CODES["interrupted"] if res.interrupted else res.exit_code
+    if res.interrupted:
+        print(f"opsquire: interrupted; continue with: opsquire ask --resume {res.ask_id}", file=sys.stderr)
+        return EXIT_CODES["interrupted"]
+    if res.waiting:
+        print(f"opsquire: waiting on: {res.waiting}", file=sys.stderr)
+        print(f'answer with: opsquire ask --resume {res.ask_id} "<your answer>"', file=sys.stderr)
+        return 0
+    if res.exit_code and not res.text.strip():
+        print(
+            f"opsquire: agent failed (exit {res.exit_code}) without an answer; see its messages above", file=sys.stderr
+        )
+        return 1
+    print(res.text.strip(), flush=True)
+    if res.limited:
+        when = f"it resets at {res.resets_at}" if res.resets_at else "its reset time could not be read"
+        print(
+            f"\nopsquire: the agent's usage limit is reached; {when}. Continue then with: opsquire ask --resume "
+            f"{res.ask_id} (the console continues it by itself at the reset)",
+            file=sys.stderr,
+        )
+        return 1
+    if res.exit_code:
+        again = f"opsquire ask --resume {res.ask_id}" if res.session else "the same ask again"
+        print(
+            f"\nopsquire: the agent failed (exit {res.exit_code}); once what it says above is fixed, run {again}",
+            file=sys.stderr,
+        )
+        return 1
+    if res.session:
+        hint = f'\nfollow up: opsquire ask --resume {res.ask_id} "..."'
+        for tid in res.task_ids:
+            hint += f'\n       or: opsquire ask --task {tid} "..."'
+        print(hint, file=sys.stderr)
+    return 0
+
+
+def cmd_wait(a: argparse.Namespace) -> int:
+    task = resolve_task(a.task)
+
+    def progress(msg: str) -> None:
+        print(f"opsquire: {msg}", file=sys.stderr, flush=True)
+
+    def decided() -> str | None:
+        d = decision(load_task(task.folder).raw) if task.folder.is_dir() else None
+        return decision_text(task.id, d) if d else None
+
+    deadline = time.monotonic() + a.timeout
+    rec = wait_for_run(task.id, a.since, a.timeout, progress, decided=decided)
+    if rec is None:
+        print(f"opsquire: no finished run of {task.id} within {a.timeout:g}s", file=sys.stderr)
+        return 124
+    read = [rec]
+    if verify_follows(task, rec):
+        progress(f"run {rec['run_id']} applied ok; waiting for the verify check that follows it")
+        checked = wait_for_run(task.id, str(rec["started"]), max(0.0, deadline - time.monotonic()), progress)
+        if checked is None:
+            print(
+                f"opsquire: {task.id} applied ok, but its verify check did not finish within {a.timeout:g}s",
+                file=sys.stderr,
+            )
+            return 124
+        rec = checked
+        read.append(rec)
+    if "decided" in rec:
+        if a.json:
+            emit({"id": task.id, "decided": rec["decided"]}, True)
+        print(f"opsquire: no run is coming: {rec['decided']}", file=sys.stderr)
+        return WAIT_DECIDED
+    reads.mark_records(handover.author(), read)
+    if a.json:
+        emit(rec, True)
+    else:
+        emit(None, False, run_table([rec]))
+        print(f"\nrun dir: {rec['paths']['dir']}")
+    if rec.get("mode") in ("apply", "verify") and rec.get("status") != "ok":
+        print(
+            f"opsquire: {task.id} is not closed: decide what happens next (fix and hand over again, or "
+            f"`opsquire close {task.id} --outcome partial|abandoned --note ...`)",
+            file=sys.stderr,
+        )
+    return EXIT_CODES.get(str(rec.get("status")), 1)
+
+
+def verify_follows(task: Task, rec: dict[str, Any]) -> bool:
+    """Whether `opsquire run --apply` runs the task's verify check right after this apply, as its own run: then the
+    apply alone does not say how the task ended."""
+    meta = task.meta
+    if meta is None or not meta.verify or task.kind == "plan" or rec.get("plan_run"):
+        return False
+    argv = [str(x) for x in rec.get("argv") or []]
+    return rec.get("mode") == "apply" and rec.get("status") == "ok" and is_last_stage(meta, argv)
+
+
+def cmd_init(a: argparse.Namespace) -> int:
+    if a.offboard_days is not None and a.offboard_days < 0:
+        raise OpsquireError("--offboard-days must be 0 (never automatically) or more")
+    for line in init(a.path, a.budget, a.dry_run, a.offboard_days, a.fresh_after, a.time_zone):
+        print(line)
+    return 0
+
+
+def cmd_home(a: argparse.Namespace) -> int:
+    if a.path:
+        target = Path(a.path).expanduser().resolve()
+        update_config(home=str(target))
+        print(f"home set to {target} (in {config_path()})")
+        return 0
+    configured = home_dir() != DEFAULT_HOME
+    source = "OPSQUIRE_HOME" if os.environ.get("OPSQUIRE_HOME") else str(config_path()) if configured else "default"
+    print(home_dir())
+    print(f"(from {source})", file=sys.stderr)
+    return 0
+
+
+def cmd_contract(a: argparse.Namespace) -> int:
+    if not a.write:
+        sys.stdout.write(contract.stamped(contract.contract_text(home_dir())))
+        return 0
+    contract.write_contract(home_dir(), a.force)
+    print(f"wrote {home_dir() / 'AGENTS.md'} and {home_dir() / 'CLAUDE.md'}")
+    return 0
+
+
+def cmd_integrate(a: argparse.Namespace) -> int:
+    for line in integrate(a.dry_run):
+        print(line)
+    return 0
+
+
+def cmd_repo(a: argparse.Namespace) -> int:
+    if a.action == "list":
+        found = repos.registry()
+        local = {r.name: repos.freshness(r) for r in found.values()}
+        emit(
+            [
+                {"name": r.name, "path": str(r.path), "github": r.github, "base": r.base, "local": local[r.name]}
+                for r in found.values()
+            ],
+            a.json,
+            [["NAME", "GITHUB", "BASE", "PATH", "LOCAL CHECKOUT"]]
+            + [[r.name, r.github, r.base, str(r.path), local[r.name]] for r in found.values()],
+        )
+        return 0
+    if a.action == "checkout":
+        if not a.target:
+            raise OpsquireError("say which repo: opsquire repo checkout <name>")
+        copy = repos.checkout(a.target, a.base)
+        print(copy)
+        stale = repos.stale_copy_note(copy)
+        if stale:
+            print(f"opsquire: WARNING: {stale}", file=sys.stderr)
+        return 0
+    if a.action == "prune":
+        days = keep_days() if a.days is None else a.days
+        if a.days is None and days <= 0:
+            raise OpsquireError("automatic pruning is off for this home (retention 0); pass --days N")
+        if days < 0:
+            raise OpsquireError("--days cannot be negative")
+        pruned = repos.prune_chat_copies(days, dry=a.dry)
+        if a.json:
+            emit(pruned | {"days": days, "dry": a.dry}, True)
+            return 0
+        print_prune(pruned, days, a.dry, sys.stdout)
+        return 0
+    if a.action == "overlap":
+        if not a.target:
+            raise OpsquireError("say which copy: opsquire repo overlap <copy-path>")
+        overlaps = repos.overlapping_prs(Path(a.target).expanduser().resolve())
+        emit(overlaps, a.json, overlap_table(overlaps))
+        return 0
+    if not a.target or not a.title:
+        raise OpsquireError('opsquire repo pr <copy-path> --title "..." --body-file <file>')
+    body = Path(a.body_file).read_text() if a.body_file else ""
+    result = repos.open_pr(Path(a.target).expanduser().resolve(), a.title, body, a.branch)
+    if result["auto_deploy_base"]:
+        print(f"opsquire: WARNING: {result['base']} auto-deploys; merging this PR deploys it", file=sys.stderr)
+    mine = {*result["changed"], *result["deleted"]}
+    for other in repos.overlapping_prs(Path(a.target).expanduser().resolve(), mine):
+        files = ", ".join(other["files"][:5])
+        print(f"opsquire: WARNING: {other['url']} ({other['author']}) also changes {files}", file=sys.stderr)
+    if a.json:
+        emit(result, True)
+    else:
+        print(f"PR: {result['url']}" if result["url"] else f"Pushed to {result['branch']} (no open PR)")
+        print(
+            f"   {result['repo']} {result['branch']} -> {result['base']}, commit {result['commit'][:10]}, "
+            f"{len(result['changed'])} changed, {len(result['deleted'])} deleted"
+        )
+    return 0
+
+
+def print_prune(pruned: dict[str, list[dict[str, Any]]], days: float, dry: bool, out: TextIO) -> None:
+    copies = [c for c in pruned["removed"] if not c.get("leftover")]
+    freed = repos.size_text(sum(c["bytes"] for c in copies))
+    verb = "would remove" if dry else "removed"
+    print(f"{verb} {len(copies)} chat repo copies idle {days_text(days)}+ days ({freed})", file=out)
+    for c in pruned["kept"]:
+        what = "base commit unreadable" if c["unpushed"] is None else f"unpushed: {', '.join(c['unpushed'][:5])}"
+        print(f"  kept {c['path']} ({what})", file=out)
+
+
+def overlap_table(overlaps: list[dict[str, Any]]) -> list[list[str]]:
+    if not overlaps:
+        return []
+    return [["PR", "AUTHOR", "BRANCH", "SHARED FILES"]] + [
+        [str(o["url"]), str(o["author"]), str(o["branch"]), ", ".join(o["files"])] for o in overlaps
+    ]
+
+
+def cmd_piece(a: argparse.Namespace) -> int:
+    """Fan-out for chat agents: open a piece (worktree + env for its subagent), land it, drop it, list them."""
+    if a.action == "open":
+        if not a.target:
+            raise OpsquireError('opsquire piece open <name> [--group <g>] [--request "..."]')
+        info = piece.open_piece(a.target, a.group, a.request)
+        if a.json:
+            emit({**info.to_json(), "brief": piece.brief(info)}, True)
+        else:
+            print(info.worktree)
+            print(f"branch: {info.branch}")
+            print("\nBrief for the subagent:\n" + piece.brief(info))
+        return 0
+    if a.action == "land":
+        if not a.target:
+            raise OpsquireError("opsquire piece land <name|group/name|path>")
+        landing = piece.land(a.target)
+        if a.json:
+            emit(landing.to_json(), True)
+        elif landing.merged:
+            extra = "" if landing.tasks else "; no task or general script changed"
+            print(f"piece {landing.piece}: landed in the home{extra}")
+            for tid, state in landing.tasks.items():
+                print(f"  {tid}: {state}")
+        else:
+            print(f"piece {landing.piece}: NOT landed, conflicts in: " + ", ".join(landing.conflicts))
+            print("  resolve the markers in the worktree keeping both intents, lint, then `opsquire piece land` again")
+        failed = any(not s.startswith(("ready", "deleted")) for s in landing.tasks.values())
+        return 0 if landing.merged and not failed else 1
+    if a.action == "drop":
+        if not a.target:
+            raise OpsquireError("opsquire piece drop <name|group/name|path> [--delete]")
+        print(piece.drop(a.target, a.delete))
+        return 0
+    home = piece.home_repo()
+    infos = piece.open_pieces(home)
+    emit([p.to_json() for p in infos], a.json, piece.describe(infos))
+    return 0
+
+
+def cmd_milestones(a: argparse.Namespace) -> int:
+    at = now()
+    kinds = tuple(k.strip() for k in a.kind.split(",")) if a.kind else KINDS
+    unknown = [k for k in kinds if k not in KINDS]
+    if unknown:
+        raise OpsquireError(f"--kind: unknown {', '.join(unknown)}; use {', '.join(KINDS)}")
+    zone = configured_time_zone()
+    items = milestones(since_arg(a.since, at, zone), a.until, a.thread, kinds, at)
+    if a.json:
+        emit(items, True)
+    else:
+        print(render(items, at, zone))
+    return 0
+
+
+def cmd_threads(a: argparse.Namespace) -> int:
+    """The home as threads (the stories tasks belong to), with each task's status and suggestions."""
+    s = state()
+    if a.json:
+        emit(s, True)
+        return 0
+    for th in s["threads"]:
+        flag = "" if th["explicit"] else " (inferred)"
+        left = f"  (+{th['offboarded']} offboarded)" if th["offboarded"] else ""
+        print(f"{th['state']:<5} {th['title']}{flag}  [{th['updated'] or '-'}]{left}")
+        for tid in th["tasks"]:
+            t = s["tasks"][tid]
+            print(f"      {t['status']:<10} {tid}")
+            for sg in t["suggestions"]:
+                print(f"                 ! {sg['kind']}: {sg['text']}")
+    return 0
+
+
+def verdict(out: dict[str, Any]) -> str:
+    if out["decision"] == "keep":
+        return f"{out['id']}: kept open: {out['note']}"
+    if out["decision"] == "verify":
+        return f"{out['id']}: needs the verify check: {out['note']}"
+    if out["decision"] == "failed":
+        return f"{out['id']}: failed: {out['note']}"
+    return f"{out['id']}: closed {out['decision']}: {out['note']}"
+
+
+def cmd_judge(a: argparse.Namespace) -> int:
+    """An agent reads the task's record and closes it (done, partial, abandoned) or says what is missing."""
+    if a.due == bool(a.task):
+        raise OpsquireError("name a task, or --due for every task that needs a decision")
+    if not a.due and (a.jobs, a.max) != (None, None):
+        raise OpsquireError("--jobs and --max go with --due")
+    if a.due:
+        return judge_due(a)
+    out = judge(resolve_task(a.task).id, a.agent, a.tier or "")
+    if a.json:
+        emit(out, True)
+        return 0
+    print(verdict(out))
+    if out["decision"] in ("keep", "verify"):
+        return 1
+    for note in out.get("notes") or []:
+        print(note, file=sys.stderr)
+    return 0
+
+
+def judge_due(a: argparse.Namespace) -> int:
+    """Every task that needs a decision, judged a.jobs at a time; 1 when any judge failed."""
+    jobs = DUE_JOBS if a.jobs is None else a.jobs
+    limit = DUE_MAX if a.max is None else a.max
+    if min(jobs, limit) < 1:
+        raise OpsquireError("--jobs and --max must be at least 1")
+    ids = due(limit)
+    if not ids and not a.json:
+        print("no task needs a decision")
+
+    def report(out: dict[str, Any]) -> None:
+        if not a.json:
+            print(f"{verdict(out)}  (${out['cost_usd']:.2f})", flush=True)
+
+    results = judge_all(ids, jobs, report, a.agent, a.tier or "")
+    if a.json:
+        emit(results, True)
+    elif results:
+        failed = sum(r["decision"] == "failed" for r in results)
+        print(f"{len(results)} judged, {failed} failed, ${sum(r['cost_usd'] for r in results):.2f} in all")
+    return 1 if any(r["decision"] == "failed" for r in results) else 0
+
+
+def cmd_ui(a: argparse.Namespace) -> int:
+    pin_home()
+
+    def ready(login: str) -> None:
+        print(f"opsquire ui: {url(a.port)}  (home {home_dir()}; Ctrl-C stops)", flush=True)
+        print(f"opsquire ui: log in with {login}  (valid until this console stops)", flush=True)
+        if a.open:
+            import webbrowser
+
+            webbrowser.open(login)
+
+    try:
+        serve(a.port, on_ready=ready)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_docs(a: argparse.Namespace) -> int:
+    out = write_docs()
+    print(f"wrote {out / 'CATALOG.md'} and one page per general script in {out}")
+    return 0
+
+
+def sync_contract() -> None:
+    try:
+        note = contract.sync(home_dir())
+    except (OpsquireError, OSError) as e:
+        note = f"AGENTS.md not refreshed: {str(e).splitlines()[0]}"
+    if note:
+        print(f"opsquire: {note}", file=sys.stderr)
+
+
+def refresh_docs() -> None:
+    with contextlib.suppress(OSError):
+        write_docs()
+
+
+def cmd_locks(a: argparse.Namespace) -> int:
+    data = {t: [h.__dict__ | {"alive": h.alive()} for h in hs] for t, hs in locks.holders().items() if hs}
+    zone = configured_time_zone()
+    table = [["TARGET", "MODE", "TOKEN", "RUN", "TASK", "USER", "SINCE", "ALIVE"]] + [
+        [
+            t,
+            h["mode"],
+            str(h["token"] or "-"),
+            h["run_id"],
+            h["task_id"],
+            h["user"] or "-",
+            shown(h["since"], zone),
+            str(h["alive"]),
+        ]
+        for t, hs in data.items()
+        for h in hs
+    ]
+    emit(data, a.json, table if data else [])
+    return 0
+
+
+def cmd_unlock(a: argparse.Namespace) -> int:
+    answer = tty_prompt(f"Remove every lock on {a.target!r}? Type the target name to confirm: ")
+    if answer != a.target:
+        print("not removed")
+        return 1
+    removed = locks.remove(a.target)
+    print(f"removed {len(removed)} lock(s): " + ", ".join(h.run_id for h in removed))
+    return 0
+
+
+def cmd_policy(a: argparse.Namespace) -> int:
+    """Show or change the tiers (target patterns) and which modes the console starts by itself per tier."""
+    change: dict[str, Any] = {}
+    if a.tier:
+        tier, *patterns = a.tier
+        change["tiers"] = {tier: patterns}
+    if a.auto:
+        tier, *modes = a.auto
+        change["auto_run"] = {tier: [] if modes == ["off"] else modes}
+    rules = policy.change(change) if change or a.seal else policy.settings()
+    if a.json:
+        emit(rules, True)
+        return 0 if rules["sealed"] or not (change or a.seal) else 1
+    for tier in policy.TIERS:
+        patterns = ", ".join(rules["tiers"].get(tier, [])) or ("everything else" if tier == policy.STRICTEST else "-")
+        modes = "never" if tier == policy.STRICTEST else ", ".join(rules["auto_run"].get(tier, [])) or "off"
+        print(f"{tier:<8} targets {patterns}")
+        print(f"{'':<8} auto-run {modes}")
+    print("A task takes its strictest target's tier. Auto-run trusts the targets tasks declare; prod never auto-runs.")
+    if rules["sealed"]:
+        return 0
+    print(
+        "NOT SEALED: these rules start nothing by themselves until the operator seals them from their own shell "
+        "(`opsquire policy --seal`) or the console's Settings",
+        file=sys.stderr,
+    )
+    return 1 if change or a.seal else 0
+
+
+def cmd_audit(a: argparse.Namespace) -> int:
+    """Check the ledger and the run records it sealed; print the checkpoint to keep somewhere off this machine."""
+    if a.run:
+        return audit_run(a.run, a.json)
+    try:
+        out = ledger.audit(a.against)
+    except ValueError as e:
+        raise OpsquireError(str(e)) from None
+    if a.json:
+        emit({"ok": out.ok, **asdict(out), "export": ledger.last_export()}, True)
+        return 0 if out.ok else 1
+    runs = out.runs
+    problems = f"{len(out.problems)} problem" + ("s" if len(out.problems) != 1 else "")
+    print(f"opsquire audit: {'OK' if out.ok else problems}")
+    print(f"  ledger     {out.entries} entries, {len(out.actors)} actor chains, {out.checkpoints} checkpoints")
+    print(
+        f"  runs       {runs['sealed']} sealed, {runs['before_ledger']} before the ledger, {runs['running']} running, "
+        f"{runs['unsealed']} never sealed (runner killed)"
+    )
+    print(f"  snapshots  {out.snapshot_files} files")
+    if out.before_ledger_changed:
+        print(
+            f"  note       {len(out.before_ledger_changed)} snapshot files of runs before the ledger differ from their "
+            "records; nothing can say when (--json lists them)"
+        )
+    if out.unrecorded:
+        print(f"  note       {len(out.unrecorded)} decisions in meta.json were never recorded (--json lists them)")
+    if out.against:
+        print(f"  against    {'extends' if out.against['consistent'] else 'does NOT extend'} {a.against}")
+    for problem in out.problems[:AUDIT_SHOWN]:
+        print(f"  - {problem}")
+    if len(out.problems) > AUDIT_SHOWN:
+        print(f"  ... and {len(out.problems) - AUDIT_SHOWN} more (--json lists them all)")
+    print(f"checkpoint {out.checkpoint}")
+    sent = ledger.last_export()
+    if sent:
+        how = "sent" if sent.get("ok") else f"NOT sent ({sent.get('error', 'failed')})"
+        print(f"  {how} {sent.get('checkpoint')} at {sent.get('at')} with `{sent.get('command')}`")
+    elif not ledger.export_command():
+        print("  keep it off this machine; `opsquire audit --against <it>` later proves the history up to it is")
+        print("  unchanged (or set a checkpoint command in the console's Settings to send every new one by itself)")
+    return 0 if out.ok else 1
+
+
+def audit_run(query: str, as_json: bool) -> int:
+    found = find_run(query)
+    report = ledger.run_entries(found.name if found else query)
+    entries = report["entries"]
+    ok = bool(entries) and all(x["included"] for x in entries)
+    if as_json:
+        emit({"ok": ok, **report}, True)
+        return 0 if ok else 1
+    if not entries:
+        print(f"opsquire: no ledger entries for run {report['run']}")
+    for x in entries:
+        e = x["entry"]
+        state = "included" if x["included"] else "NOT included"
+        print(f"#{e.get('seq')} {e.get('at')} {e.get('kind')} by {ledger.actor_key(e.get('actor'))}: {state}")
+        print(f"  {json.dumps(e.get('data'), sort_keys=True)}")
+        for h in x["proof"]:
+            print(f"  proof {h}")
+    print(f"checkpoint {report['checkpoint']}")
+    return 0 if ok else 1
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="opsquire",
+        description="Agents write the scripts, you run them, everything is recorded for the next agent.",
+    )
+    p.add_argument("--version", action="version", version=f"opsquire {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    n = sub.add_parser("new", help="scaffold a task (or --general script)")
+    n.add_argument("area")
+    n.add_argument("name")
+    n.add_argument("--purpose", required=True)
+    n.add_argument("--lang", choices=["py", "sh"], default="py")
+    n.add_argument("--general", action="store_true")
+    n.add_argument("--plan", action="store_true", help="a plan: runs --step tasks in order with one command")
+    n.add_argument("--json", action="store_true")
+    n.add_argument("--step", action="append", metavar="TASK", help="plan step, in order (repeat)")
+    n.add_argument("--changes-prod", action="store_true")
+    n.add_argument(
+        "--no-verify", action="store_true", help="changing task without a verify check (say why in design.md)"
+    )
+    n.add_argument("--target", action="append")
+    n.add_argument("--lock", choices=["exclusive", "shared", "none"])
+    n.add_argument("--lock-reason")
+    n.add_argument("--cred", action="append", metavar="ENV=dotted.key")
+    n.add_argument("--uses", action="append", metavar="GENERAL_ID")
+    n.add_argument("--rollback")
+    n.add_argument("--link", action="append")
+    n.add_argument("--thread", help="the thread (story) this task belongs to; else inferred from session and links")
+    n.add_argument("--author")
+    n.add_argument("--hold", metavar="WHY", help="created held: out of the inbox until handed over")
+    n.add_argument(
+        "--stage",
+        action="append",
+        metavar="NAME",
+        help="a stage of a task that runs in stages, in order (repeat): the first argument each stage's runs take",
+    )
+    n.add_argument("--interpreter", help="python for this task (e.g. a project venv); default: opsquire's own")
+    n.set_defaults(fn=cmd_new)
+
+    for name, fn, helptext in (
+        ("lint", cmd_lint, "ruff + mypy --strict + shellcheck + meta checks + the task's tests"),
+        ("show", cmd_show, "task details and run history"),
+    ):
+        s = sub.add_parser(name, help=helptext)
+        s.add_argument("task")
+        s.add_argument("--json", action="store_true")
+        s.set_defaults(fn=fn)
+
+    r = sub.add_parser("run", help="run a task (dry or read by default); script args go after --")
+    r.add_argument("task")
+    r.add_argument("--apply", action="store_true", help="really change things (prod-changing tasks only)")
+    r.add_argument("--verify", action="store_true", help="run the task's verify check: is its intended state live?")
+    r.add_argument(
+        "--from-start",
+        action="store_true",
+        help="plans: run every step, even those the last stopped apply finished (by default a plan resumes after them)",
+    )
+    r.add_argument("--break-lock", action="store_true", help="offer to override a held lock (asks you to type BREAK)")
+    r.add_argument(
+        "--no-wait", action="store_true", help="end blocked when a clashing run holds a target, instead of waiting"
+    )
+    r.add_argument(
+        "--skip-dry",
+        metavar="WHY",
+        help="with --apply: go ahead although no ok dry run covers these scripts and arguments; the reason is recorded",
+    )
+    r.add_argument(
+        "--dry-first",
+        action="store_true",
+        help="with --apply: run the dry run first, then the apply only if it ended ok (its own questions still ask)",
+    )
+    r.add_argument("-v", "--verbose", action="store_true", help="also show the runner's bookkeeping and [data] events")
+    r.set_defaults(fn=cmd_run)
+
+    ho = sub.add_parser(
+        "handover",
+        help="say a task is ready and recommend its run: in the inbox with your reason until it runs (args after --)",
+    )
+    ho.add_argument("task")
+    ho.add_argument("--apply", action="store_true", help="hand over the apply run (changing tasks)")
+    ho.add_argument("--verify", action="store_true", help="hand over the verify check")
+    ho.add_argument("--why", help="one line on why this run is needed now; shown in the inbox")
+    ho.add_argument(
+        "--changed", help="what changed in its code since its last run, in plain words (required when it did)"
+    )
+    ho.add_argument("--again", action="store_true", help="an apply that already ran the same way must run again")
+    ho.add_argument("--withdraw", action="store_true", help="take the task's handover out of the inbox")
+    ho.add_argument("--json", action="store_true")
+    ho.set_defaults(fn=cmd_handover)
+
+    cp = sub.add_parser("compact", help="share repeated snapshot files and gzip logs of runs finished for a day")
+    cp.add_argument("--quiet", action="store_true")
+    cp.set_defaults(fn=cmd_compact)
+
+    dr = sub.add_parser(
+        "doctor",
+        help="is opsquire working here: console, stop hook, libraries, test isolation, contract, author; exit 1 if not",
+    )
+    dr.add_argument("--json", action="store_true")
+    dr.add_argument(
+        "--boundary",
+        action="store_true",
+        help="run inside an agent's sandbox: check it cannot write run records or locks, or read credentials",
+    )
+    dr.set_defaults(fn=cmd_doctor)
+
+    sh = sub.add_parser("share", help="share the home with a group of operators: group read/write, setgid folders")
+    sh.add_argument("group", help="an existing group you are in")
+    sh.add_argument("--dry", action="store_true", help="say what would change, change nothing")
+    sh.set_defaults(fn=cmd_share)
+
+    po = sub.add_parser("policy", help="tiers by target and what the console may start by itself (operator only)")
+    po.add_argument("--tier", nargs="+", metavar=("TIER", "PATTERN"), help="set a tier's target patterns (none: clear)")
+    po.add_argument("--auto", nargs="+", metavar=("TIER", "MODE"), help="modes the console starts by itself, or off")
+    po.add_argument("--seal", action="store_true", help="seal the rules as they stand, so auto-run follows them")
+    po.add_argument("--json", action="store_true")
+    po.set_defaults(fn=cmd_policy)
+
+    au = sub.add_parser("audit", help="check the ledger and every run record against it; exit 1 on any mismatch")
+    au.add_argument("--json", action="store_true")
+    au.add_argument("--run", metavar="RUN_ID", help="that run's entries and their inclusion proofs")
+    au.add_argument("--against", metavar="SIZE:ROOT", help="prove the ledger extends a checkpoint kept earlier")
+    au.set_defaults(fn=cmd_audit)
+
+    ur = sub.add_parser("unread", help="(for agents) finished runs you handed over and have not read; exit 1 if any")
+    ur.add_argument("--author", help="whose; default OPSQUIRE_AUTHOR")
+    ur.add_argument("--hook", action="store_true", help="answer a Claude Code Stop hook event on stdin")
+    ur.add_argument("--json", action="store_true")
+    ur.set_defaults(fn=cmd_unread)
+
+    hd = sub.add_parser("hold", help="keep a task (and a plan's steps) out of the inbox until handed over or --until")
+    hd.add_argument("task")
+    hd.add_argument("--why", help="what it waits for; shown with the task")
+    hd.add_argument("--until", help="HH:MM in the display zone (HH:MMZ for UTC), or an ISO time, when it comes back")
+    hd.add_argument("--release", action="store_true", help="end the hold now")
+    hd.set_defaults(fn=cmd_hold)
+
+    sp = sub.add_parser("supersede", help="a newer task replaced this one: it leaves the inbox and will not run")
+    sp.add_argument("task")
+    sp.add_argument("--by", required=True, help="the task that replaced it")
+    sp.add_argument("--note", help="what changed")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_supersede)
+
+    ro = sub.add_parser("reopen", help="undo a close or a supersession (an expiry that was wrong, say)")
+    ro.add_argument("task")
+    ro.add_argument("--note", required=True, help="why it is open again")
+    ro.add_argument("--json", action="store_true")
+    ro.set_defaults(fn=cmd_reopen)
+
+    cl = sub.add_parser("close", help="record how a task really ended (done, partial, abandoned) with a note")
+    cl.add_argument("task")
+    cl.add_argument("--outcome", required=True, choices=OUTCOME_STATES)
+    cl.add_argument("--note", required=True, help="what actually happened, e.g. finished by hand, which run landed")
+    cl.add_argument("--run", help="the run that landed it (id or unique part)")
+    cl.add_argument("--json", action="store_true")
+    cl.set_defaults(fn=cmd_close)
+
+    ib = sub.add_parser("inbox", help="what waits on you: the next run of each task, and unread chats")
+    ib.add_argument("--json", action="store_true")
+    ib.set_defaults(fn=cmd_inbox)
+
+    ls = sub.add_parser("ls", help="list tasks with derived status")
+    ls.add_argument("--area")
+    ls.add_argument("--status", choices=[*TASK_STATUSES, *SCRIPT_STATUSES])
+    ls.add_argument("--kind", choices=["task", "general", "plan"])
+    ls.add_argument("--json", action="store_true")
+    ls.set_defaults(fn=cmd_ls)
+
+    rs = sub.add_parser("runs", help="list runs, oldest first")
+    rs.add_argument("task", nargs="?")
+    rs.add_argument("--status", choices=["running", "ok", "partial", "failed", "aborted", "interrupted", "blocked"])
+    rs.add_argument("--area")
+    rs.add_argument("--since", help="date, ISO time, HH:MM (today, display zone) or 2h/30m/1d")
+    rs.add_argument("--limit", type=int, default=50)
+    rs.add_argument("--json", action="store_true")
+    rs.set_defaults(fn=cmd_runs)
+
+    last = sub.add_parser("last", help="most recent run")
+    last.add_argument("--json", action="store_true")
+    last.set_defaults(fn=cmd_last)
+
+    lg = sub.add_parser("log", help="print a run's output.log (or --events)")
+    lg.add_argument("run", help="run id, task id, or a unique part of either")
+    lg.add_argument("--events", action="store_true")
+    lg.add_argument("--json", action="store_true")
+    lg.set_defaults(fn=cmd_log)
+
+    fd = sub.add_parser(
+        "find", help="general scripts to reuse and past tasks like it, by keywords (search before creating)"
+    )
+    fd.add_argument("words", nargs="*")
+    fd.add_argument("--limit", type=int, default=10, help="hits per section (default 10)")
+    fd.add_argument(
+        "--eval", action="store_true", help="score the reuse ranking on this home's own tasks (recall@k, MRR)"
+    )
+    fd.add_argument("--json", action="store_true")
+    fd.set_defaults(fn=cmd_find)
+
+    ob = sub.add_parser(
+        "offboard", help="move settled tasks out of tasks/ into offboarded/ (nothing is deleted; see restore)"
+    )
+    ob.add_argument("task", nargs="*", help="tasks (a plan takes its steps along) or unused general scripts, now")
+    ob.add_argument("--due", action="store_true", help="every settled task idle for the retention period")
+    ob.add_argument("--days", type=float, metavar="N", help="with --due: this retention instead of the home's")
+    ob.add_argument("--dry", action="store_true", help="say what would move, move nothing")
+    ob.add_argument("--json", action="store_true")
+    ob.set_defaults(fn=cmd_offboard)
+
+    rst = sub.add_parser("restore", help="bring offboarded tasks back, with the general scripts and steps they need")
+    rst.add_argument("task", nargs="+")
+    rst.add_argument("--json", action="store_true")
+    rst.set_defaults(fn=cmd_restore)
+
+    ak = sub.add_parser("ask", help="ask an agent to find or write the task for a request; prints what to run")
+    ak.add_argument("request", nargs="*")
+    ak.add_argument("--task", help="follow up on a task (resumes its agent conversation when possible)")
+    ak.add_argument("--resume", metavar="ASK_ID", help="continue an earlier (e.g. interrupted) ask")
+    ak.add_argument("--agent", help="agent from retinue.json (default from retinue.json)")
+    ak.add_argument("--new", action="store_true", help="start a fresh conversation even with --task")
+    ak.add_argument(
+        "--fresh", action="store_true", help="with --resume: a new agent session in that conversation, not its old one"
+    )
+    ak.add_argument("--no-grill", action="store_true", help="no interview: the agent takes defaults and records them")
+    ak.add_argument("--no-split", action="store_true", help="one agent only, even when the request has parts")
+    ak.add_argument("--max-agents", type=int, metavar="N", help="at most N agents working at once (default: no limit)")
+    ak.add_argument(
+        "--budget",
+        type=float,
+        metavar="USD",
+        help="spending reminder for the whole ask, all agents together (default: from `opsquire init --budget`)",
+    )
+    ak.add_argument(
+        "--model",
+        metavar="TIER|ID",
+        help="a tier from the agent's retinue entry (quick, default, deep) or a model id; pieces use its piece_tier",
+    )
+    ak.add_argument("--strict-budget", action="store_true", help="make --budget a hard cap instead of a reminder")
+    ak.set_defaults(fn=cmd_ask)
+
+    td = sub.add_parser(
+        "tend", help="library upkeep: general script usage, copied code, hand-loaded imports, unused scripts"
+    )
+    td.add_argument("--json", action="store_true")
+    td.add_argument("--fix", action="store_true", help="hand the fixable findings to an agent (an ask, hard cost cap)")
+    td.add_argument("--budget", type=float, metavar="USD", help=f"cap for --fix (default {tend.FIX_BUDGET_USD:g})")
+    td.add_argument("--agent", help="agent from retinue.json for --fix")
+    td.add_argument("--model", metavar="TIER|ID", help="model tier or id for --fix")
+    td.set_defaults(fn=cmd_tend)
+
+    ap = sub.add_parser(
+        "approve-server", help="(started by ask agents) the MCP server that asks you before a tool runs"
+    )
+    ap.add_argument("--ask", required=True, help="the ask's approvals key")
+    ap.add_argument("--agent", default="", help="the agent from retinue.json whose tool names to read")
+    ap.set_defaults(fn=cmd_approve_server)
+
+    wt = sub.add_parser("wait", help="wait for the next finished run of a task, then print it (for agents)")
+    wt.add_argument("task")
+    wt.add_argument("--since", help="UTC ISO time; default: newer than the latest run that exists now")
+    wt.add_argument(
+        "--timeout",
+        type=float,
+        default=540,
+        help="seconds (default 540); exit 124 on timeout, 4 when the task was abandoned or superseded instead",
+    )
+    wt.add_argument("--json", action="store_true")
+    wt.set_defaults(fn=cmd_wait)
+
+    ct = sub.add_parser("contract", help="print the agent contract (packaged AGENTS.md + the home's LOCAL.md)")
+    ct.add_argument("--write", action="store_true", help="write it to the home as AGENTS.md and CLAUDE.md")
+    ct.add_argument("--force", action="store_true", help="overwrite an AGENTS.md that was edited by hand")
+    ct.set_defaults(fn=cmd_contract)
+
+    ini = sub.add_parser("init", help="set up a machine: home, local rules, config, credentials, skill, first task")
+    ini.add_argument("path", nargs="?", help="the home to use (default: the configured or default home)")
+    ini.add_argument("--budget", type=float, metavar="USD", help="spending reminder per `opsquire ask`")
+    ini.add_argument(
+        "--fresh-after",
+        type=float,
+        metavar="USD",
+        help="the console's follow-ups start a fresh, briefed agent session once a chat's last turn cost this much "
+        "(default 5; -1 turns it off)",
+    )
+    ini.add_argument(
+        "--time-zone",
+        metavar="ZONE",
+        help="where people read times: UTC (default), local, or a zone name such as America/New_York; "
+        "records and --json stay UTC",
+    )
+    ini.add_argument(
+        "--offboard-days",
+        type=float,
+        metavar="N",
+        help="settled tasks leave tasks/ N days after their last activity (default 7; 0: never automatically)",
+    )
+    ini.add_argument("--dry-run", action="store_true")
+    ini.set_defaults(fn=cmd_init)
+
+    ig = sub.add_parser(
+        "integrate",
+        help="install the opsquire skill and Stop hook for Claude agents; make the home a local-only git repo",
+    )
+    ig.add_argument("--dry-run", action="store_true")
+    ig.set_defaults(fn=cmd_integrate)
+
+    rp = sub.add_parser(
+        "repo",
+        help="change a code/config repo as a GitHub PR: list, checkout <repo>, overlap <copy>, pr <copy>, prune",
+    )
+    rp.add_argument("action", choices=["list", "checkout", "overlap", "pr", "prune"])
+    rp.add_argument("target", nargs="?", help="repo name (checkout) or copy path (overlap, pr)")
+    rp.add_argument("--title", help="PR title (first line) and commit message")
+    rp.add_argument("--body-file", help="PR description, markdown")
+    rp.add_argument("--branch", help="branch name (default: <branch_prefix><title words>)")
+    rp.add_argument("--base", help="checkout: branch to copy and open the PR against (default: the repo's base)")
+    rp.add_argument("--days", type=float, help="prune: idle days before a chat copy goes (default: the retention)")
+    rp.add_argument("--dry", action="store_true", help="prune: list what would go, remove nothing")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(fn=cmd_repo)
+
+    pc = sub.add_parser(
+        "piece", help="fan-out for chat agents: open <name> (worktree for one subagent), land <name>, drop <name>, ls"
+    )
+    pc.add_argument("action", choices=["open", "land", "drop", "ls"])
+    pc.add_argument("target", nargs="?", help="piece name (open), or name, group/name or worktree path (land, drop)")
+    pc.add_argument("--request", default="", help="open: the piece's self-contained request, recorded on its branch")
+    pc.add_argument("--group", help="open: pieces of one request share a group (default: the OPSQUIRE_AUTHOR session)")
+    pc.add_argument("--delete", action="store_true", help="drop: discard the piece and its branch, do not park it")
+    pc.add_argument("--json", action="store_true")
+    pc.set_defaults(fn=cmd_piece)
+
+    jg = sub.add_parser("judge", help="let an agent decide how a task ended from its record, and close it")
+    jg.add_argument("task", nargs="?")
+    jg.add_argument("--due", action="store_true", help="judge every task that needs a decision (exit 1 if any failed)")
+    jg.add_argument("--jobs", type=int, metavar="N", help=f"--due: judges at a time (default {DUE_JOBS})")
+    jg.add_argument("--max", type=int, metavar="N", help=f"--due: the newest N at most (default {DUE_MAX})")
+    jg.add_argument("--tier", choices=TIERS, help="model tier from the agent's retinue entry (default: its own)")
+    jg.add_argument("--agent", help="agent from retinue.json (default from retinue.json)")
+    jg.add_argument("--json", action="store_true")
+    jg.set_defaults(fn=cmd_judge)
+
+    ms = sub.add_parser(
+        "milestones",
+        help="what happened that others would want to know: changing tasks closed, applies or verifies that failed, "
+        "thread results",
+    )
+    ms.add_argument(
+        "--since", help="date, ISO time, HH:MM (today, display zone) or 2h/30m/1d; default: midnight today there"
+    )
+    ms.add_argument("--until", help="ISO prefix")
+    ms.add_argument("--thread", help="one thread only")
+    ms.add_argument("--kind", help="comma-separated: done, failed, result (default: all)")
+    ms.add_argument("--json", action="store_true")
+    ms.set_defaults(fn=cmd_milestones)
+
+    th = sub.add_parser("threads", help="tasks grouped into the threads (stories) they belong to, with suggestions")
+    th.add_argument("--json", action="store_true")
+    th.set_defaults(fn=cmd_threads)
+
+    ui = sub.add_parser("ui", help="serve the home's picture on localhost: threads, tasks, runs, scripts, locks")
+    ui.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ui.add_argument("--open", action="store_true", help="open its login link in the browser")
+    ui.set_defaults(fn=cmd_ui)
+
+    dc = sub.add_parser("docs", help="regenerate docs/: the catalog and an API page per general script")
+    dc.set_defaults(fn=cmd_docs)
+
+    hm = sub.add_parser("home", help="show the data home, or set it")
+    hm.add_argument("path", nargs="?")
+    hm.set_defaults(fn=cmd_home)
+
+    lk = sub.add_parser("locks", help="show held locks")
+    lk.add_argument("--json", action="store_true")
+    lk.set_defaults(fn=cmd_locks)
+
+    ul = sub.add_parser("unlock", help="remove all locks on a target (asks you to type it)")
+    ul.add_argument("target")
+    ul.set_defaults(fn=cmd_unlock)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    script_args = argv[argv.index("--") + 1 :] if "--" in argv else []
+    a = parser().parse_args(argv[: argv.index("--")] if "--" in argv else argv)
+    a.script_args = script_args
+
+    def to_interrupt(_signum: int, _frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, to_interrupt)
+    if shared_home():
+        os.umask(os.umask(0) & ~0o070)
+    try:
+        code: int = a.fn(a)
+        if a.cmd in ("new", "lint", "run"):
+            sweep_after_command()
+        if a.cmd in ("new", "lint", "run", "offboard", "restore"):
+            refresh_docs()
+            sync_contract()
+        return code
+    except OpsquireError as e:
+        print(f"opsquire: {e}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\nopsquire: interrupted", file=sys.stderr)
+        return EXIT_CODES["interrupted"]
+    except BrokenPipeError:
+        return 0

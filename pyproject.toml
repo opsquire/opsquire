@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opsquire"
+version = "0.9.0"
+description = "Agents prepare the scripts, you run them, and every run is recorded for the next agent."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://github.com/opsquire/opsquire"
+Releases = "https://github.com/opsquire/opsquire/releases"
+
+[project.optional-dependencies]
+lint = ["ruff>=0.5", "mypy>=1.10", "vulture>=2.14"]
+coverage = ["coverage>=7.10"]
+test = ["pytest>=8", "pytest-xdist>=3"]
+
+[project.scripts]
+opsquire = "opsquire.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opsquire = ["py.typed", "data/*.json", "data/*.toml", "data/*.ini", "data/*.md", "data/ui/*.html", "data/ui/css/*.css", "data/ui/js/*.js", "data/helpers/*", "data/templates/*", "data/skills/*/*"]
+
+[tool.vulture]
+paths = ["src", "scripts"]
+ignore_names = [
+    "do_GET", "do_POST", "server_version", "protocol_version", "close_connection", "daemon_threads", "server_name",
+    "server_port", "HOSTS", "lock_token", "Decisions",
+]
+
+[tool.mypy]
+strict = true
+mypy_path = "src/opsquire/data/helpers"
+exclude = ["^src/opsquire/data/"]
+
+[tool.coverage.run]
+source = ["opsquire"]
+omit = ["*/opsquire/data/*"]
+patch = ["subprocess"]
+parallel = true
+
+[tool.coverage.report]
+skip_empty = true
+
+[tool.coverage.paths]
+source = ["src/opsquire", "*/opsquire"]
