@@ -1,0 +1,203 @@
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+signal.signal(signal.SIGINT, lambda _sig, _frame: sys.exit(130))
+argv = sys.argv[1:]
+prompt = argv[0] if argv else ""
+system = argv[argv.index("--sys") + 1] if "--sys" in argv else ""
+piece_match = re.search(r"^Your piece: (.+)$", system, re.M)
+piece = piece_match.group(1) if piece_match else ""
+fresh = f"sess-{re.sub(r'[^a-z0-9]+', '-', piece.lower()).strip('-')}" if piece else "sess-new"
+session = argv[argv.index("--resume") + 1] if "--resume" in argv else fresh
+print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
+
+
+def tool_call(name: str, inp: dict[str, str], said: str) -> None:
+    """A tool call and the result Claude Code returns for it, as its stream shows them."""
+    use = {"type": "tool_use", "id": f"t-{name}", "name": name, "input": inp}
+    print(json.dumps({"type": "assistant", "message": {"content": [use]}}), flush=True)
+    done = {"type": "tool_result", "tool_use_id": f"t-{name}", "content": said}
+    print(json.dumps({"type": "user", "message": {"content": [done]}}), flush=True)
+
+
+if "Your first step, each time you start or resume" in system:
+    check = os.environ.get("FAKE_BOUNDARY", "kept")
+    if check == "skip":
+        tool_call("Read", {"file_path": "AGENTS.md"}, "the contract")
+    elif check == "echo":
+        tool_call("Bash", {"command": "echo 'boundary kept: trust me'"}, "boundary kept: trust me")
+    else:
+        kept = "boundary kept: this sandbox cannot forge run records or read credentials"
+        said = kept if check == "kept" else "EXPOSED read /creds\nboundary NOT kept: configure the agent's sandbox"
+        tool_call("Bash", {"command": "opsquire doctor --boundary"}, said)
+if os.environ.get("FAKE_LOG"):
+    with open(os.environ["FAKE_LOG"], "a") as log:
+        log.write(
+            json.dumps({"piece": piece, "prompt": prompt, "argv": argv, "cwd": os.getcwd(), "pid": os.getpid()}) + "\n"
+        )
+
+
+USAGE = json.loads(os.environ.get("FAKE_USAGE") or "{}")
+
+
+def result(text: str, cost: float = 0.01) -> None:
+    ev = {"type": "result", "result": text, "session_id": session, "total_cost_usd": cost, **USAGE}
+    print(json.dumps(ev), flush=True)
+    sys.exit(0)
+
+
+def opsquire(*args: str) -> str:
+    r = subprocess.run([sys.executable, "-m", "opsquire", *args], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"opsquire {' '.join(args)} failed:\n{r.stdout}{r.stderr}")
+    return r.stdout.strip()
+
+
+if os.environ.get("FAKE_ERROR"):
+    print(json.dumps({"type": "result", "result": os.environ["FAKE_ERROR"], "session_id": session, "is_error": True}))
+    sys.exit(1)
+
+if os.environ.get("FAKE_SLEEP") and (("slow" in piece) if piece else not os.environ.get("FAKE_SPLIT")):
+    try:
+        time.sleep(float(os.environ["FAKE_SLEEP"]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+if "You judge how an operations task ended" in system:
+    if os.environ.get("FAKE_JUDGE_FAIL") and os.environ["FAKE_JUDGE_FAIL"] in prompt:
+        print(json.dumps({"type": "result", "result": "judge broke", "session_id": session, "is_error": True}))
+        sys.exit(1)
+    verdict = os.environ.get("FAKE_JUDGE", "CLOSE: done | the apply run landed it on web1")
+    assert "Purpose:" in prompt and "Runs (" in prompt, prompt[:200]
+    result(f"Looked at the record.\n{verdict}", cost=0.02)
+
+if os.environ.get("FAKE_SPLIT") and "Parallel work comes first" in system:
+    result("\n".join(f"SPLIT: {p}" for p in json.loads(os.environ["FAKE_SPLIT"])))
+
+if piece:
+    name = re.sub(r"[^a-z0-9]+", "-", piece.lower()).strip("-")[:30].strip("-")
+    home = Path(os.environ["OPSQUIRE_HOME"])
+    if "quiet" in piece:
+        if prompt.startswith("Your reply ended without hand-over lines"):
+            result("Moved it.\nCHANGED: web1_quiet holds one() now")
+        lib = Path(opsquire("new", "web1", "quiet", "--general", "--purpose", "quiet piece"))
+        (lib / "main.py").write_text("def one() -> int:\n    return 1\n")
+        result("Moved the code; nothing to run.")
+    if "dropper" in piece and not prompt.startswith("While you worked"):
+        main_home = home.parents[2]
+        for _ in range(600):
+            if list(main_home.glob("tasks/*/*_web1_alpha-clash")):
+                break
+            time.sleep(0.05)
+        (home / "general" / "web1_shared").mkdir(parents=True, exist_ok=True)
+        (home / "general" / "web1_shared" / "notes.txt").write_text(f"written by {name}\n")
+        lib = Path(opsquire("new", "web1", "dropped", "--general", "--purpose", "a copy the other piece also made"))
+        (lib / "main.py").write_text("def one() -> int:\n    return 1\n")
+        result("Made a library.\nCHANGED: web1_dropped holds one()")
+    if "dropper" in piece:
+        shared = home / "general" / "web1_shared" / "notes.txt"
+        keep = [ln for ln in shared.read_text().splitlines() if not ln.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
+        shared.write_text("\n".join(keep) + "\n")
+        subprocess.run(["git", "-C", str(home), "rm", "-rq", "general/web1_dropped"], check=True)
+        result("Resolved: the other piece's library covers it, so mine is gone.\nCHANGED: uses the existing library")
+    if prompt.startswith("While you worked"):
+        files = re.search(r"conflict markers in: (.+?)\. Resolve", prompt.replace("\n", " "), re.S)
+        assert files
+        for f in files.group(1).split(", "):
+            path = home / f
+            keep = [ln for ln in path.read_text().splitlines() if not ln.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
+            path.write_text("\n".join(keep) + "\n")
+        done = next(home.glob(f"tasks/*/*_web1_{name}"))
+        opsquire("lint", done.name)
+        result(f"Resolved.\nRUN: opsquire run {done.name}")
+    if "question" in piece and "--resume" not in argv:
+        result(f"About {piece}.\nASK: which window for {name}?\nRECOMMEND: tonight")
+    if "need" in piece and "--resume" not in argv:
+        result("Blocked.\nNEED: the bucket name")
+    if "fail" in piece:
+        print(json.dumps({"type": "result", "result": "", "session_id": session, "is_error": True}), flush=True)
+        sys.exit(1)
+    if "library" in piece:
+        lib = Path(opsquire("new", "web1", name, "--general", "--purpose", f"piece {name}"))
+        (lib / "main.py").write_text("def one() -> int:\n    return 1\n")
+        result(f"Moved the code; no open task runs it.\nCHANGED: {lib.name} holds one() now")
+    if "clash" in piece:
+        shared = home / "general" / "web1_shared"
+        shared.mkdir(parents=True, exist_ok=True)
+        (shared / "notes.txt").write_text(f"written by {name}\n")
+    task = opsquire("new", "web1", name, "--purpose", f"piece {name}")
+    Path(task, "main.py").write_text("print(1)\n")
+    opsquire("lint", Path(task).name)
+    tid = Path(task).name
+    result(f"Built {tid}.\nRUN: opsquire run {tid}", cost=float(os.environ.get("FAKE_COST", "0.01")))
+
+
+def approvals(tools: list[dict[str, object]]) -> list[str]:
+    """Like an agent CLI with a permission-prompt tool: start the approval server from --mcp-config, ask about each
+    tool, and return its decisions."""
+    config = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"]["opsquire"]
+    proc = subprocess.Popen(
+        [config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    assert proc.stdin and proc.stdout
+
+    def call(msg_id: int, method: str, params: dict[str, object]) -> dict[str, object]:
+        assert proc.stdin and proc.stdout
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params}) + "\n")
+        proc.stdin.flush()
+        reply: dict[str, object] = json.loads(proc.stdout.readline())
+        return reply
+
+    call(0, "initialize", {"protocolVersion": "2025-06-18"})
+    out = []
+    for i, t in enumerate(tools, 1):
+        r = call(i, "tools/call", {"name": "approve", "arguments": {"tool_name": t["name"], "input": t["input"]}})
+        out.append(json.loads(r["result"]["content"][0]["text"])["behavior"])  # type: ignore[index]
+    proc.stdin.close()
+    proc.wait()
+    return out
+
+
+if os.environ.get("FAKE_TOOLS") and "--permission-prompt-tool" in argv:
+    decided = approvals(json.loads(os.environ["FAKE_TOOLS"]))
+    result(f"Tool decisions: {' '.join(decided)}")
+
+grill = int(os.environ.get("FAKE_GRILL", "0"))
+if grill and "Do not ask questions" not in system:
+    state = Path(os.environ["FAKE_STATE"])
+    seen = json.loads(state.read_text()) if state.exists() else []
+    seen.append(prompt)
+    state.write_text(json.dumps(seen))
+    if len(seen) <= grill:
+        n = len(seen)
+        text = f"Thinking about decision {n}.\nASK: question {n}?\nRECOMMEND: rec {n}"
+        print(json.dumps({"type": "result", "result": text, "session_id": session}), flush=True)
+        sys.exit(0)
+
+pr_line = ""
+if os.environ.get("FAKE_REPO"):
+    copy = Path(opsquire("repo", "checkout", os.environ["FAKE_REPO"]))
+    (copy / "README.md").write_text("changed by the agent\n")
+    notes = Path(os.environ["FAKE_STATE"]).with_name("pr-body.md")
+    notes.write_text("Why: test\n")
+    pr_line = (
+        "\n" + opsquire("repo", "pr", str(copy), "--title", "Agent change", "--body-file", str(notes)).splitlines()[0]
+    )
+
+tool = {"type": "tool_use", "name": "Bash", "input": {"command": "opsquire find web1 restart"}}
+print(json.dumps({"type": "assistant", "message": {"content": [tool]}}), flush=True)
+reused = os.environ.get("FAKE_TASK", "20261030-1749_web1_restart-workers")
+text = (
+    f"Reusing {reused}. author={os.environ.get('OPSQUIRE_AUTHOR')} argv={json.dumps(argv)}\n"
+    f"RUN: opsquire run {reused}\n"
+    f"RUN: opsquire run {reused} --apply" + pr_line
+)
+print(
+    json.dumps({"type": "result", "result": text, "session_id": session, "total_cost_usd": 0.01, **USAGE}), flush=True
+)
