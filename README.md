@@ -256,4 +256,6 @@ Report a vulnerability privately, as [SECURITY.md](SECURITY.md) says.
 
 ## License
 
-[Apache-2.0](LICENSE).
+[FSL-1.1-ALv2](LICENSE), the Functional Source License: use, change and run it for any purpose, inside any
+company, except offering it as a competing commercial product or service. Each release becomes Apache-2.0 two years
+after it is published.
