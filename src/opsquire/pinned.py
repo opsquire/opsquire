@@ -5,6 +5,8 @@ terminal is too small, unknown, or progress goes somewhere else."""
 from __future__ import annotations
 
 import os
+import select
+import signal
 import sys
 import textwrap
 import threading
@@ -21,11 +23,29 @@ class Pin:
     cols = 0
 
 
+def read_line(inp: IO[str]) -> str:
+    """The reply typed on the terminal. A Ctrl-C handled just before a blocking read starts never ends that read, so
+    the prompt would hang: the reply is awaited in select, which the signal's wakeup byte ends too, and the handler
+    (KeyboardInterrupt for Ctrl-C) runs before it waits again."""
+    woken, wake = os.pipe()
+    os.set_blocking(wake, False)
+    previous = signal.set_wakeup_fd(wake) if threading.current_thread() is threading.main_thread() else None
+    try:
+        while inp.fileno() not in select.select([inp.fileno(), woken], [], [])[0]:
+            os.read(woken, 64)
+        return inp.readline()
+    finally:
+        if previous is not None:
+            signal.set_wakeup_fd(previous)
+        os.close(woken)
+        os.close(wake)
+
+
 def plain(question: str, recommend: str) -> str | None:
     with open("/dev/tty", "w") as out, open("/dev/tty") as inp:
         out.write(f"\n? {question}\n  [Enter = {recommend}] > ")
         out.flush()
-        return inp.readline() or None
+        return read_line(inp) or None
 
 
 def layout(question: str, recommend: str, cols: int) -> list[str]:
@@ -57,7 +77,7 @@ def ask(question: str, recommend: str) -> str | None:
             out.flush()
             Pin.out, Pin.bottom, Pin.cols = out, bottom, cols
         try:
-            return inp.readline() or None
+            return read_line(inp) or None
         finally:
             with LOCK:
                 Pin.out = None

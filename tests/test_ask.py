@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,25 @@ class AskTest(OpsTestCase):
         self.assertEqual(rec["status"], "waiting")
         r = self.cli("ask", "--resume", rec["ask_id"], "go", "with", "rec")
         self.assertIn("RUN:", r.stdout)
+
+    def test_a_question_returns_the_typed_line_and_ctrl_c_while_it_waits_ends_it(self) -> None:
+        code = textwrap.dedent(
+            """
+            import os, signal, threading
+            from opsquire.pinned import read_line
+            typed, answer = os.pipe()
+            os.write(answer, b"yes\\n")
+            print(repr(read_line(os.fdopen(typed))))
+            silent, _ = os.pipe()
+            threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
+            try:
+                read_line(os.fdopen(silent))
+            except KeyboardInterrupt:
+                print("interrupted")
+            """
+        )
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.split(), ["'yes\\n'", "interrupted"], r.stderr)
 
     def test_grill_ctrl_c_at_question_keeps_session(self) -> None:
         self.grill_env(2)
