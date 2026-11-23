@@ -82,6 +82,17 @@ def tty_prompt(question: str) -> str:
         return ""
 
 
+def unattended_refusal(targets: list[str]) -> str | None:
+    tier = policy.task_tier(targets)
+    if policy.auto_allowed(tier, "apply"):
+        return None
+    return (
+        f"nobody is present to start this apply: its targets ({', '.join(targets)}) are {tier}, where your policy "
+        "does not auto-run apply; run it from a terminal or the console, or move its targets to a tier that "
+        "auto-runs apply (`opsquire policy`)"
+    )
+
+
 class Run:
     def __init__(
         self,
@@ -684,15 +695,7 @@ class Run:
     def check_unattended(self) -> str | None:
         if self.mode != "apply" or run_origin() != ORIGIN_UNATTENDED:
             return None
-        targets = self.run_targets()
-        tier = policy.task_tier(targets)
-        if policy.auto_allowed(tier, "apply"):
-            return None
-        return (
-            f"nobody is present to start this apply: its targets ({', '.join(targets)}) are {tier}, where your policy "
-            "does not auto-run apply; run it from a terminal or the console, or move its targets to a tier that "
-            "auto-runs apply (`opsquire policy`)"
-        )
+        return unattended_refusal(self.run_targets())
 
     def check_dry(self) -> str | None:
         """An apply needs a dry run that finished ok with the same scripts and arguments, or a recorded reason to

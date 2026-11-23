@@ -1,10 +1,9 @@
 """Version and release-notes helpers, stdlib only: the release workflow reads the version, scripts/export.py sets it
-and writes the notes.
+and writes the notes (`python3 scripts/export.py --dry` previews them).
 
     python3 scripts/release.py version                     the version in pyproject.toml
     python3 scripts/release.py next patch|minor|major     the version a release of that size gets
     python3 scripts/release.py set-version 0.3.0          rewrite pyproject.toml to that version
-    python3 scripts/release.py notes v0.3.0 [--since v0.2.0]   release notes from the commits since the last tag
 
 Notes group commit subjects by their `area:` prefix (the convention of this repo's history), keep the first
 paragraph of each body as the explanation, and end with the compare link."""
@@ -66,12 +65,6 @@ def git(*args: str) -> str:
     return r.stdout
 
 
-def previous_tag(exclude: str, before: str = "HEAD") -> str | None:
-    """The newest release tag reachable from `before`, other than the one being made."""
-    tags = git("tag", "--list", "v*", "--sort=-v:refname", "--merged", before).split()
-    return next((t for t in tags if t != exclude), None)
-
-
 def commits_between(since: str | None, until: str) -> list[tuple[str, str]]:
     """(subject, body) of every non-merge commit in (since, until], newest first."""
     span = f"{since}..{until}" if since else until
@@ -114,10 +107,6 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("part", choices=["major", "minor", "patch"])
     s = sub.add_parser("set-version")
     s.add_argument("version")
-    r = sub.add_parser("notes")
-    r.add_argument("tag")
-    r.add_argument("--since", help="previous tag (default: the newest v* tag reachable from HEAD)")
-    r.add_argument("--repo", default="opsquire/opsquire", help="owner/name for the compare link")
     a = p.parse_args(argv)
     try:
         if a.cmd == "version":
@@ -127,9 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "set-version":
             set_version(a.version)
             print(a.version)
-        else:
-            since = a.since or previous_tag(a.tag)
-            print(notes(a.tag, since, commits_between(since, "HEAD"), a.repo), end="")
     except ReleaseError as e:
         print(f"release: {e}", file=sys.stderr)
         return 2

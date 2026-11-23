@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +15,11 @@ with open(os.environ["FAKE_GH_LOG"], "a") as log:
 
 def save() -> None:
     state_path.write_text(json.dumps(state))
+
+
+def public(*a: str) -> str:
+    remote = os.environ["FAKE_GH_REMOTE"]
+    return subprocess.run(["git", "-C", remote, *a], check=True, capture_output=True, text=True).stdout
 
 
 if args[:3] == ["api", "-X", "POST"]:
@@ -73,6 +80,19 @@ elif args[:2] == ["api", "graphql"]:
     state["refs"][branch] = oid
     save()
     print(json.dumps({"data": {"createCommitOnBranch": {"commit": {"oid": oid}}}}))
+elif args[0] == "api" and (m := re.fullmatch(r"repos/[^/]+/[^/]+/commits/([^?]+)", args[1])):
+    sha, *parents = public("rev-list", "-n", "1", "--parents", m.group(1)).split()
+    message = public("log", "-1", "--format=%B", sha).rstrip("\n")
+    print(json.dumps({"sha": sha, "commit": {"message": message}, "parents": [{"sha": p} for p in parents]}))
+elif args[0] == "api" and (m := re.fullmatch(r"repos/[^/]+/[^/]+/git/trees/([0-9a-f]+)\?recursive=1", args[1])):
+    tree = []
+    for rec in public("ls-tree", "-r", "-t", "-z", m.group(1)).split("\0"):
+        if rec:
+            meta, path = rec.split("\t", 1)
+            tree.append({"path": path, "type": meta.split()[1], "sha": meta.split()[2]})
+    print(json.dumps({"truncated": False, "tree": tree}))
+elif args[0] == "api" and re.fullmatch(r"repos/[^/]+/[^/]+/tags\?per_page=100", args[1]):
+    print(json.dumps([{"name": t} for t in public("tag", "--list").split()]))
 elif args[:2] == ["pr", "list"] and "--head" not in args:
     print(json.dumps(state.get("open_prs", [])))
 elif args[:2] == ["pr", "list"]:

@@ -44,7 +44,6 @@ from .judge import DUE_JOBS, DUE_MAX, due, judge, judge_all
 from .lint import lint_changed_scripts, lint_task, save_lint
 from .milestones import KINDS, milestones, render, since_arg
 from .model import (
-    DEFAULT_HOME,
     GENERAL_ID_RE,
     NO_UNDO,
     OFFBOARDED,
@@ -63,11 +62,13 @@ from .model import (
     decision,
     decision_text,
     home_dir,
+    home_source,
     is_last_stage,
     iso,
     load_task,
     main_home,
     next_stage,
+    no_home,
     now,
     pin_home,
     resolve_task,
@@ -188,7 +189,7 @@ def cmd_share(a: argparse.Namespace) -> int:
         raise OpsquireError("shared homes need Linux: a Mac drops the setgid bit that keeps new folders the group's")
     home = main_home()
     if not home.is_dir():
-        raise OpsquireError(f"no home at {home}")
+        raise OpsquireError(no_home(home))
     done = share(home, a.group, a.dry)
     verb = "would change" if a.dry else "changed"
     print(f"opsquire share: {home} for group {a.group}: {verb} {done.changed} paths, {done.right} already right")
@@ -1129,10 +1130,8 @@ def cmd_home(a: argparse.Namespace) -> int:
         update_config(home=str(target))
         print(f"home set to {target} (in {config_path()})")
         return 0
-    configured = home_dir() != DEFAULT_HOME
-    source = "OPSQUIRE_HOME" if os.environ.get("OPSQUIRE_HOME") else str(config_path()) if configured else "default"
     print(home_dir())
-    print(f"(from {source})", file=sys.stderr)
+    print(f"(from {home_source()})", file=sys.stderr)
     return 0
 
 

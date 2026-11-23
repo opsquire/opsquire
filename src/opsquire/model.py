@@ -291,11 +291,31 @@ def home_dir() -> Path:
     return resolved(configured) if isinstance(configured, str) else DEFAULT_HOME
 
 
+PINNED_FROM: dict[str, str] = {}
+
+
+def home_source() -> str:
+    """Where home_dir() came from: OPSQUIRE_HOME, the config file's path, or default. pin_home sets OPSQUIRE_HOME
+    itself, so a pinned home keeps the source it had before."""
+    env = os.environ.get("OPSQUIRE_HOME")
+    if env:
+        return PINNED_FROM.get(env, "OPSQUIRE_HOME")
+    return str(config_path()) if home_dir() != DEFAULT_HOME else "default"
+
+
+def no_home(home: Path) -> str:
+    return (
+        f"no home at {home} (from {home_source()}); `opsquire init {home}` creates it, or point opsquire at an "
+        "existing home with `opsquire home <path>` or OPSQUIRE_HOME"
+    )
+
+
 def pin_home() -> Path:
     """Resolve the home once for this process and every process it starts: a run, the console and the jobs it starts,
     or an ask keep working in the home they began in when the config's `home` changes meanwhile (a run that switched
     homes halfway lost its record)."""
     home = home_dir()
+    PINNED_FROM[str(home)] = home_source()
     os.environ["OPSQUIRE_HOME"] = str(home)
     return home
 
@@ -1010,7 +1030,8 @@ def resolve_task(query: str, offboarded: bool = False) -> Task:
         return load_task(folder)
     folder = match_folder(offboarded_folders(), query)
     if folder is None:
-        raise OpsquireError(f"no task matches {query!r}")
+        home = home_dir()
+        raise OpsquireError(f"no task matches {query!r}" + ("" if home.is_dir() else f": there is {no_home(home)}"))
     if not offboarded:
         raise OpsquireError(
             f"{folder.name} is offboarded (settled and idle): `opsquire restore {folder.name}` brings it back, "

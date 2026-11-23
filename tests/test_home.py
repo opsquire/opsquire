@@ -355,6 +355,26 @@ class HomeTest(OpsTestCase):
         self.assertEqual(r.stdout, f"{self.home.resolve()}\n")
         self.assertIn("(from OPSQUIRE_HOME)", r.stderr)
 
+    def test_naming_a_task_without_a_home_says_where_opsquire_looked_and_how_to_make_one(self) -> None:
+        missing = self.tmp / "no-home"
+        self.env["OPSQUIRE_HOME"] = str(missing)
+        r = self.cli("run", "nosuch")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        for words in (str(missing), "OPSQUIRE_HOME", "opsquire init", "opsquire home"):
+            self.assertIn(words, r.stderr)
+        self.assertFalse(missing.exists(), "nothing creates the home")
+        del self.env["OPSQUIRE_HOME"]
+        self.config.write_text(json.dumps({"home": str(missing)}))
+        r = self.cli("run", "nosuch")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(f"no home at {missing} (from {self.config})", r.stderr)
+
+    def test_naming_no_task_in_an_existing_home_says_only_that(self) -> None:
+        r = self.cli("run", "nosuch")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        errors = [line for line in r.stderr.splitlines() if line.startswith("opsquire: ")]
+        self.assertEqual(errors, ["opsquire: no task matches 'nosuch'"])
+
     def test_new_takes_json_and_explains_a_bad_area(self) -> None:
         made = self.cli("new", "web1", "thing", "--purpose", "p", "--json")
         self.assertEqual(made.returncode, 0, made.stderr)
@@ -508,6 +528,15 @@ class HomeTest(OpsTestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("you are not in group", r.stderr)
         self.assertEqual(self.tree(), before)
+
+    @LINUX_ONLY
+    def test_share_without_a_home_says_where_opsquire_looked_and_how_to_make_one(self) -> None:
+        missing = self.tmp / "no-home"
+        self.env["OPSQUIRE_HOME"] = str(missing)
+        r = self.cli("share", self.own_group())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(f"no home at {missing} (from OPSQUIRE_HOME)", r.stderr)
+        self.assertIn("opsquire init", r.stderr)
 
     @LINUX_ONLY
     def test_a_shared_home_creates_everything_group_writable_and_an_unshared_one_as_before(self) -> None:

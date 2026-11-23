@@ -13,6 +13,7 @@ from . import handover, ledger, locks, policy, runner, schedule
 from .creds import Redactor, Secrets
 from .lint import lint_task, save_lint
 from .model import (
+    ORIGIN_UNATTENDED,
     SCHEMA,
     Heartbeat,
     Meta,
@@ -354,6 +355,10 @@ class PlanRun:
         mode = lock_mode(running) if self.apply else locks.run_lock(self.mode, lock_mode(running))
         targets = sorted({t for m in running for t in m.targets})
         self.lock_info |= {"mode": mode, "targets": targets}
+        if self.apply and run_origin() == ORIGIN_UNATTENDED and policy.started_by() is None:
+            refused = runner.unattended_refusal(targets)
+            if refused:
+                return self.finish("blocked", refused)
         if mode != "none":
             me = locks.Holder(
                 self.run_id,

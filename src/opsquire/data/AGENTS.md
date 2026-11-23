@@ -600,7 +600,9 @@ the script touches, never fewer. Nothing in the home sets a tier, and you never 
 policy` is the operator's): rules count for auto-run only once the operator seals them in `var/`, so a change from
 your sandbox starts nothing and shows as NOT SEALED. A run that auto-started is followed like any other (`opsquire
 wait`). An apply with nobody present (origin `unattended`: cron, a script) is held to the same rules: it is refused
-(`blocked`) unless its tier auto-runs apply, so a scheduled job can apply only where the operator allowed it.
+(`blocked`) unless its tier auto-runs apply, so a scheduled job can apply only where the operator allowed it. An
+unattended plan apply is checked against the strictest tier of all its steps' and rollbacks' targets before any step
+runs, so it never applies half of itself.
 
 ## Library upkeep
 
