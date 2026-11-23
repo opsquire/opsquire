@@ -38,6 +38,43 @@ class LockTest(OpsTestCase):
         self.assertEqual(self.cli("run", "locked").returncode, 0)
         self.assertEqual(self.last("locked")["lock"]["stale_reclaimed"][0]["pid"], dead.pid)
 
+    def held_on_web1(self) -> list[str]:
+        held = json.loads(self.cli("locks", "--json").stdout)
+        return [h["run_id"] for h in held.get("web1", [])]
+
+    def test_unlock_removes_the_locks_when_the_target_name_is_typed(self) -> None:
+        self.write_lock("web1", os.getpid())
+        r = self.cli("unlock", "web1", answers=[("Type the target name to confirm: ", "web1")])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("removed 1 lock(s): R1", r.stdout)
+        self.assertEqual(self.held_on_web1(), [])
+        lines = (self.home / "var/ledger/entries.jsonl").read_text().splitlines()
+        removes = [e["data"] for e in map(json.loads, lines) if e["kind"] == "lock" and e["data"]["event"] == "remove"]
+        self.assertEqual([(d["target"], [h["run_id"] for h in d["holders"]]) for d in removes], [("web1", ["R1"])])
+
+    def test_unlock_keeps_the_locks_on_any_other_answer(self) -> None:
+        self.write_lock("web1", os.getpid())
+        for answer in ("web", ""):
+            r = self.cli("unlock", "web1", answers=[("Type the target name to confirm: ", answer)])
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("not removed", r.stdout)
+            self.assertEqual(self.held_on_web1(), ["R1"], repr(answer))
+
+    def test_unlock_without_a_terminal_keeps_the_locks(self) -> None:
+        self.write_lock("web1", os.getpid())
+        r = subprocess.run(
+            [*CLI, "unlock", "web1"],
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            start_new_session=True,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("not removed", r.stdout)
+        self.assertEqual(self.held_on_web1(), ["R1"])
+
     def test_a_dead_runners_lock_holds_while_its_script_still_runs(self) -> None:
         from opsquire import locks
         from opsquire.model import host_name, iso, now, pid_namespace

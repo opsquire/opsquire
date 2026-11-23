@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -11,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from support import ROOT
 
@@ -70,6 +73,19 @@ class ReleaseScripts(unittest.TestCase):
         first = release.notes("v0.1.0", None, [("release: v0.1.0", "")], "acme/opsquire")
         self.assertIn("No changes since the previous release.", first)
         self.assertIn("https://github.com/acme/opsquire/commits/v0.1.0", first)
+
+    def test_release_has_no_notes_subcommand_and_still_prints_the_version(self) -> None:
+        release = self.load("release")
+        for argv in (["notes", "v1.0.0"], ["notes", "v1.0.0", "--since", "v0.9.0"]):
+            with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(io.StringIO()):
+                release.main(argv)
+            self.assertEqual(raised.exception.code, 2, argv)
+        self.assertFalse(hasattr(release, "previous_tag"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(release.main(["version"]), 0)
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        self.assertEqual(out.getvalue(), pyproject.split('version = "')[1].split('"')[0] + "\n")
 
     def signed_checkout(self) -> tuple[Path, Path]:
         """A bare 'GitHub' repository with one commit on main, a clone of it, and a fake gh that commits into the bare
@@ -145,6 +161,141 @@ class ReleaseScripts(unittest.TestCase):
         sha = "0123456789abcdef0123456789abcdef01234567"
         self.assertEqual(export.exported_from(f"opsquire 0.9.0\n\nnotes\n\nExported from {sha}"), sha)
         self.assertIsNone(export.exported_from("Fix a typo"), "an outside change is no export")
+
+    def export_checkout(self) -> tuple[Any, Path, Path]:
+        """scripts/export.py loaded against a private checkout whose origin is a bare repository, and the public bare
+        repository the fake gh answers for, holding one commit no export made. Listed words are made up."""
+        public, _ = self.signed_checkout()
+        private, origin = self.tmp / "private", self.tmp / "private.git"
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+        self.git(self.tmp, "clone", "-q", f"file://{origin}", str(private))
+        (private / "pyproject.toml").write_text('version = "0.3.0"\n')
+        (private / "README.md").write_text("opsquire\n")
+        (private / "src").mkdir()
+        (private / "src" / "app.py").write_text("print('hello')\n")
+        self.commit(private, "app: hello")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        self.addCleanup(sys.path.remove, str(ROOT / "scripts"))
+        export = self.load("export")
+        self.addCleanup(export.clean_text.words.cache_clear)
+        for patcher in (
+            mock.patch.dict(os.environ, {**self.env, "OPSQUIRE_BANNED_WORDS": "zorblax\nquuxly"}),
+            mock.patch.object(export, "ROOT", private),
+            mock.patch.object(export.release, "ROOT", private),
+            mock.patch.object(export.release, "PYPROJECT", private / "pyproject.toml"),
+            mock.patch.object(export.clean_text, "LIST_FILE", self.tmp / "no-banned-words.txt"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        export.clean_text.words.cache_clear()
+        return export, public, private
+
+    def commit(self, repo: Path, message: str, push: bool = True) -> None:
+        self.git(repo, "add", "-A")
+        self.git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+        if push:
+            self.git(repo, "push", "-q", "origin", "main")
+
+    def run_export(self, export: Any, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = export.main(["--to", "acme/opsquire", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_nothing_sent(self, public: Path, head: str) -> None:
+        self.assertEqual(self.git(public, "rev-parse", "main"), head, "the public main has not moved")
+        log = self.tmp / "gh.log"
+        self.assertNotIn('"graphql"', log.read_text() if log.exists() else "")
+
+    def assert_export_refused(self, export: Any, public: Path, reason: str) -> None:
+        head = self.git(public, "rev-parse", "main")
+        code, _, err = self.run_export(export)
+        self.assertEqual(code, 2, err)
+        self.assertIn(reason, err)
+        self.assert_nothing_sent(public, head)
+
+    def test_export_refuses_without_a_word_list(self) -> None:
+        export, public, _ = self.export_checkout()
+        del os.environ["OPSQUIRE_BANNED_WORDS"]
+        export.clean_text.words.cache_clear()
+        self.assert_export_refused(export, public, "no word list here")
+
+    def test_export_refuses_uncommitted_changes(self) -> None:
+        export, public, private = self.export_checkout()
+        (private / "README.md").write_text("opsquire, changed\n")
+        self.assert_export_refused(export, public, "uncommitted changes")
+
+    def test_export_refuses_a_commit_not_pushed_to_origin_main(self) -> None:
+        export, public, private = self.export_checkout()
+        (private / "README.md").write_text("opsquire, changed\n")
+        self.commit(private, "docs: not pushed", push=False)
+        self.assert_export_refused(export, public, "HEAD is not origin/main")
+
+    def test_export_refuses_a_public_main_with_changes_no_export_made(self) -> None:
+        export, public, _ = self.export_checkout()
+        code, _, err = self.run_export(export, "--dry")
+        self.assertEqual(code, 0, f"a single public commit without the line comes before the first export: {err}")
+        outside = self.tmp / "outside"
+        self.git(self.tmp, "clone", "-q", str(public), str(outside))
+        (outside / "fix.txt").write_text("an accepted pull request\n")
+        self.commit(outside, "Fix a typo")
+        self.assert_export_refused(export, public, "holds changes no export made")
+
+    def test_export_refuses_a_listed_word_in_a_file_it_writes(self) -> None:
+        export, public, private = self.export_checkout()
+        (private / "src" / "app.py").write_text("print('restart the zorblax')\n")
+        self.commit(private, "app: say what restarts")
+        self.assert_export_refused(export, public, "src/app.py: zorblax")
+
+    def test_export_dry_shows_everything_and_changes_nothing(self) -> None:
+        export, public, private = self.export_checkout()
+        head, private_head = self.git(public, "rev-parse", "main"), self.git(private, "rev-parse", "HEAD")
+        code, out, err = self.run_export(export, "--dry")
+        self.assertEqual(code, 0, err)
+        self.assertIn("as opsquire 0.3.0 to acme/opsquire: 3 files to write, 1 to delete,", out)
+        self.assertIn("in 1 commit(s); the word list found nothing.", out)
+        self.assertIn("The first public release of opsquire.", out)
+        self.assert_nothing_sent(public, head)
+        code, out, err = self.run_export(export, "--bump", "patch", "--dry")
+        self.assertEqual(code, 0, err)
+        self.assertIn("(--dry: the version would first become 0.3.1 here)", out)
+        self.assertEqual((private / "pyproject.toml").read_text(), 'version = "0.3.0"\n')
+        self.assertEqual(self.git(private, "rev-parse", "HEAD"), private_head)
+        self.assert_nothing_sent(public, head)
+
+    def test_export_sends_the_private_tree_and_then_only_what_changed(self) -> None:
+        export, public, private = self.export_checkout()
+        code, _, err = self.run_export(export)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.git(public, "rev-parse", "main^{tree}"), self.git(private, "rev-parse", "HEAD^{tree}"))
+        message = self.git(public, "log", "-1", "--format=%B", "main")
+        self.assertTrue(message.endswith(f"Exported from {self.git(private, 'rev-parse', 'HEAD')}"), message)
+        self.assertIn("The first public release of opsquire.", message)
+        (private / "README.md").write_text("opsquire, changed\n")
+        (private / "NEWS.md").write_text("news\n")
+        (private / "src" / "app.py").unlink()
+        self.commit(private, "docs: news instead of the app")
+        code, _, err = self.run_export(export)
+        self.assertEqual(code, 0, err)
+        sent = json.loads((self.tmp / "gh.json").read_text())["commits"][-1]
+        self.assertEqual((sorted(sent["added"]), sent["deleted"]), (["NEWS.md", "README.md"], ["src/app.py"]))
+        self.assertEqual(self.git(public, "rev-parse", "main^{tree}"), self.git(private, "rev-parse", "HEAD^{tree}"))
+        message = self.git(public, "log", "-1", "--format=%B", "main")
+        self.assertTrue(message.endswith(f"Exported from {self.git(private, 'rev-parse', 'HEAD')}"), message)
+
+    def test_export_too_big_for_one_commit_goes_in_parts_and_only_the_last_names_its_source(self) -> None:
+        export, public, private = self.export_checkout()
+        for name in ("big1.txt", "big2.txt"):
+            (private / name).write_text("x" * (export.PART_BYTES * 2 // 3) + "\n")
+        self.commit(private, "docs: two big files")
+        code, out, err = self.run_export(export)
+        self.assertEqual(code, 0, err)
+        self.assertIn("in 2 commit(s)", out)
+        self.assertEqual(self.git(public, "rev-list", "--count", "main"), "3", "the public seed and two parts")
+        self.assertNotIn("Exported from", self.git(public, "log", "-1", "--format=%B", "main~1"))
+        message = self.git(public, "log", "-1", "--format=%B", "main")
+        self.assertTrue(message.endswith(f"Exported from {self.git(private, 'rev-parse', 'HEAD')}"), message)
+        self.assertEqual(self.git(public, "rev-parse", "main^{tree}"), self.git(private, "rev-parse", "HEAD^{tree}"))
 
     def test_signed_commit_refuses_words_that_never_belong_here(self) -> None:
         bare, clone = self.signed_checkout()
